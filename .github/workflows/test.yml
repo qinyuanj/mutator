@@ -51,6 +51,9 @@ jobs:
             luarocks --tree="$HOME/.luarocks" install $rock
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
+          $env:LUA_PATH = "$HOME/.luarocks/share/lua/5.4/?.lua;$HOME/.luarocks/share/lua/5.4/?/init.lua;;"
+          $library = if ($IsWindows) { '?.dll' } else { '?.so' }
+          $env:LUA_CPATH = "$HOME/.luarocks/lib/lua/5.4/$library;;"
           lua -e "require('busted.runner'); require('luacov'); require('luacov.reporter.lcov')"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/setup-python@v6
