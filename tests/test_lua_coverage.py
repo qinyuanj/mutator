@@ -99,7 +99,10 @@ def test_real_suite_attributes_loads_and_independent_functions(project, toolchai
 
 def test_selected_unrequired_source_and_scope_cache_identity(project, toolchain):
     root, source = project
-    unused = root / "src" / "unused ' ü]==].lua"
+    # Native Lua uses narrow paths; GitHub's Windows runner cannot open the
+    # non-ASCII variant. The delimiter/quote escaping under test stays ASCII.
+    suffix = "unused ' ]==].lua" if os.name == "nt" else "unused ' ü]==].lua"
+    unused = root / "src" / suffix
     unused.write_text("local M = {}\nfunction M.zero()\n return 99\nend\nreturn M\n", encoding="utf-8")
     broken = root / ".claude" / "worktrees" / "broken"
     broken.mkdir(parents=True)
@@ -453,10 +456,12 @@ def test_packed_memberships_cross_byte_and_word_boundaries(tmp_path, toolchain):
 
 def test_streamed_publication_escapes_source_names(project, toolchain):
     root, source = project
-    unusual = source.with_name('calc [quoted] ü.lua')
+    # See the narrow-path note above; quotes and brackets still exercise escaping.
+    name = 'calc [quoted].lua' if os.name == 'nt' else 'calc [quoted] ü.lua'
+    unusual = source.with_name(name)
     source.rename(unusual)
     for spec in (root / 'spec').glob('*.lua'):
-        spec.write_text(spec.read_text(encoding='utf-8').replace("require('calc')", "require('calc [quoted] ü')"), encoding='utf-8')
+        spec.write_text(spec.read_text(encoding='utf-8').replace("require('calc')", f"require('{unusual.stem}')"), encoding='utf-8')
     index = collect(root, unusual)
     assert index.select(unusual, 3) == ['spec/first_spec.lua']
     assert index.select(unusual, 6) == ['spec/second_spec.lua']
