@@ -79,5 +79,8 @@ def test_spec_coverage_requires_explicit_selection(tmp_path, monkeypatch):
     monkeypatch.setattr(lua_coverage, "collect", lambda *args, **kwargs: calls.append(kwargs) or marker)
     monkeypatch.setattr(runners, "run_coverage", lambda *args: (_ for _ in ()).throw(
         AssertionError("selected Lua uses its combined collector")))
-    assert _prepare_coverage(parse_args(["--select-specs"]), tmp_path, [source]) == {tmp_path: marker}
+    other = tmp_path / "unused.lua"
+    other.write_text("return {}\n", encoding="utf-8")
+    assert _prepare_coverage(parse_args(["--select-specs"]), tmp_path, [source, other]) == {tmp_path: marker}
     assert len(calls) == 1
+    assert calls[0]["source_files"] == [source, other]

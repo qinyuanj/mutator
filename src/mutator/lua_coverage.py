@@ -140,22 +140,25 @@ def _decode(raw: dict, directory: Path, command: list[str], *, published: bool) 
     return LuaCoverageIndex(directory, command, specs, lines, fallback, overhead)
 
 
-def _identity(root: Path, directory: Path, command: list[str], busted_task: str | None) -> dict:
-    return {"root": _canonical(root), "cwd": _canonical(directory), "command": command, "busted_task": busted_task}
+def _identity(root: Path, directory: Path, command: list[str], busted_task: str | None,
+              source_files: list[Path]) -> dict:
+    return {"root": _canonical(root), "cwd": _canonical(directory), "command": command,
+            "busted_task": busted_task, "source_files": sorted({_canonical(path) for path in source_files})}
 
 
 def _artifact_hash(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def load(root: Path, source: Path, busted_task: str | None = None) -> LuaCoverageIndex | None:
+def load(root: Path, source: Path, busted_task: str | None = None, *,
+         source_files: list[Path] | None = None) -> LuaCoverageIndex | None:
     """Load only a complete index for this exact project, cwd, task and command."""
     root = root.resolve()
     command, directory, report = _plan(root, source, busted_task)
     path = report.parent / "spec-coverage.json"
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(raw, dict) or raw.get("identity") != _identity(root, directory, command, busted_task):
+        if not isinstance(raw, dict) or raw.get("identity") != _identity(root, directory, command, busted_task, [source] if source_files is None else source_files):
             return None
         artifacts = {"lcov": _artifact_hash(report), "stats": _artifact_hash(report.parent / "luacov.stats.out")}
         if raw.get("artifacts") != artifacts:
@@ -175,12 +178,12 @@ def _literal(text: str) -> str:
 
 def collect(
     root: Path, source: Path, *, busted_task: str | None = None,
-    reuse: bool = False, verbose: bool = False,
+    reuse: bool = False, verbose: bool = False, source_files: list[Path] | None = None,
 ) -> LuaCoverageIndex:
     """Collect once, rejecting failed suites before publishing metrics or cache."""
     root = root.resolve()
     if reuse:
-        cached = load(root, source, busted_task)
+        cached = load(root, source, busted_task, source_files=source_files)
         if cached is not None:
             return cached
     runners = ensure_crapper().runners
@@ -192,7 +195,8 @@ def collect(
     report.parent.mkdir(parents=True, exist_ok=True)
     for artifact in (report, stats, publication, pending):
         artifact.unlink(missing_ok=True)
-    config.write_text(runners.lua_coverage_config(stats, report), encoding="utf-8")
+    selected = [source] if source_files is None else source_files
+    config.write_text(runners.lua_coverage_config(stats, report, selected, directory), encoding="utf-8")
     run = list(command)
     try:
         entry = run.index("-e") + 1
@@ -236,7 +240,7 @@ def collect(
         spec_numbers = {name: number for number, name in enumerate(spec_ids)}
         encoded = {
             "version": _VERSION, "complete": True,
-            "identity": _identity(root, directory, command, busted_task),
+            "identity": _identity(root, directory, command, busted_task, [source] if source_files is None else source_files),
             "specs": index.specs,
             "specIds": spec_ids,
             "overhead": index.overhead,

@@ -419,11 +419,11 @@ def _prepare_coverage(options: Options, root: Path, files: list[Path]) -> dict:
 
         lua_files = [path for path in files if path.suffix == ".lua"]
         for directory in crapper.runners.lua_roots(root, lua_files):
-            source = next(path for path in lua_files
-                          if crapper.runners.lua_roots(root, [path])[0] == directory)
+            targets = [path for path in lua_files
+                       if crapper.runners.lua_roots(root, [path])[0] == directory]
             indexes[directory] = collect(
-                root, source, busted_task=options.busted_task,
-                reuse=options.use_existing_coverage, verbose=options.verbose,
+                root, targets[0], busted_task=options.busted_task,
+                reuse=options.use_existing_coverage, verbose=options.verbose, source_files=targets,
             )
         remaining = [path for path in files if path.suffix != ".lua"]
     if not options.use_existing_coverage and (remaining or not files):

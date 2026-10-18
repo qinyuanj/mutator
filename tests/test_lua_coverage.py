@@ -97,6 +97,24 @@ def test_real_suite_attributes_loads_and_independent_functions(project, toolchai
     assert not any("spec-coverage.pending" in arg for arg in index.command)
 
 
+def test_selected_unrequired_source_and_scope_cache_identity(project, toolchain):
+    root, source = project
+    unused = root / "src" / "unused ' ü]==].lua"
+    unused.write_text("local M = {}\nfunction M.zero()\n return 99\nend\nreturn M\n", encoding="utf-8")
+    broken = root / ".claude" / "worktrees" / "broken"
+    broken.mkdir(parents=True)
+    (broken / "bad.lua").write_text("not valid Lua !!!", encoding="utf-8")
+    collect(root, source)
+    assert load(root, source, source_files=[source, unused]) is None
+    index = collect(root, source, source_files=[source, unused, source], reuse=True)
+    assert load(root, source, source_files=[unused, source]) == index
+    assert load(root, source) is None
+    fresh = toolchain._fresh_lcov(toolchain._coverage_report(root, root, "lua"), root)
+    zero = next(lines for name, lines in fresh.items() if Path(name).resolve() == unused.resolve())
+    assert zero and all(hits == 0 for hits, _ in zero.values())
+    assert not any("broken" in name for name in fresh)
+
+
 def test_spec_duration_includes_elapsed_sleep(project, toolchain):
     root, source = project
     spec = root / "spec" / "first_spec.lua"
