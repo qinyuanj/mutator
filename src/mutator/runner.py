@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -65,31 +67,48 @@ def _prefer_worker_sources(cwd: Path, environment: dict) -> None:
     environment["PYTHONPATH"] = os.pathsep.join(entries)
 
 
-def _prefer_worker_lua(cwd: Path, environment: dict) -> None:
+def _rebase_lua_paths(value: str, worker: Path, source: Path) -> str:
+    prefix = source.as_posix().rstrip("/") + "/"
+    entries = []
+    for entry in value.split(";"):
+        normalized = entry.replace("\\", "/")
+        inside_worker = os.path.normcase(normalized[:len(worker.as_posix()) + 1]) == os.path.normcase(worker.as_posix() + "/")
+        if not inside_worker and os.path.normcase(normalized[:len(prefix)]) == os.path.normcase(prefix):
+            relative = normalized[len(prefix):]
+            # Dependencies are intentionally absent from the overlay.
+            if relative.split("/", 1)[0].lower() != ".toolcache":
+                entry = worker.as_posix() + "/" + relative
+        entries.append(entry)
+    return ";".join(entries)
+
+
+_LUA_PATH_NAMES = ("LUA_PATH", "LUA_PATH_5_4", "LUA_CPATH", "LUA_CPATH_5_4")
+
+
+def _prefer_worker_lua(cwd: Path, environment: dict, command: Command) -> Command:
     # These credentials describe this invocation, never an inherited worker.
     environment.pop("MUTATOR_WORKER_ROOT", None)
     environment.pop("MUTATOR_SOURCE_ROOT", None)
     worker = _worker_home(cwd.resolve())
     if worker is None:
-        return
+        return command
     source = worker.parents[3]
     environment["MUTATOR_WORKER_ROOT"] = worker.as_posix()
     environment["MUTATOR_SOURCE_ROOT"] = source.as_posix()
-    prefix = source.as_posix().rstrip("/") + "/"
-    for name in ("LUA_PATH", "LUA_PATH_5_4", "LUA_CPATH", "LUA_CPATH_5_4"):
-        if name not in environment:
-            continue
-        entries = []
-        for entry in environment[name].split(";"):
-            normalized = entry.replace("\\", "/")
-            inside_worker = os.path.normcase(normalized[:len(worker.as_posix()) + 1]) == os.path.normcase(worker.as_posix() + "/")
-            if not inside_worker and os.path.normcase(normalized[:len(prefix)]) == os.path.normcase(prefix):
-                relative = normalized[len(prefix):]
-                # Dependencies are intentionally absent from the overlay.
-                if relative.split("/", 1)[0].lower() != ".toolcache":
-                    entry = worker.as_posix() + "/" + relative
-            entries.append(entry)
-        environment[name] = ";".join(entries)
+    for name in _LUA_PATH_NAMES:
+        if name in environment:
+            environment[name] = _rebase_lua_paths(environment[name], worker, source)
+    if isinstance(command, list) and command and command[0] == "env":
+        # Assignments embedded in an `env VAR=...` prefix are what the test
+        # process and its children inherit; rebase them like the environment.
+        rebased = []
+        for part in command:
+            name, separator, value = part.partition("=")
+            if separator and "/" not in name and name in _LUA_PATH_NAMES:
+                part = name + "=" + _rebase_lua_paths(value, worker, source)
+            rebased.append(part)
+        return rebased
+    return command
 
 
 def display_command(command: Command) -> str:
@@ -118,7 +137,7 @@ class CommandRunner:
         environment = os.environ.copy()
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
         _prefer_worker_sources(cwd, environment)
-        _prefer_worker_lua(cwd, environment)
+        command = _prefer_worker_lua(cwd, environment, command)
         try:
             process = subprocess.Popen(
                 command,
@@ -299,6 +318,99 @@ def _lua_worker_setup() -> str:
     )
 
 
+_LUA_TREES: list[str] | None = None
+
+
+def _rocks_trees() -> list[str]:
+    """The machine's LuaRocks 5.4 trees, or [] when luarocks is unusable."""
+
+    global _LUA_TREES
+    if _LUA_TREES is None:
+        _LUA_TREES = []
+        exe = shutil.which("luarocks")
+        result = None
+        if exe:
+            try:
+                result = subprocess.run(
+                    [exe, "--lua-version", "5.4", "config", "rocks_trees"],
+                    capture_output=True, text=True, timeout=30,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                result = None
+        if result is not None and result.returncode == 0:
+            _LUA_TREES = [
+                match for match in re.findall(r'"([^"]+)"', result.stdout)
+                if match.startswith("/")
+            ]
+    return _LUA_TREES
+
+
+def _pinned_lua_paths(directory: Path) -> tuple[str, str] | None:
+    """Search templates confined to the LuaRocks trees, or None to keep Lua's.
+
+    Stock distribution templates (/usr/share/lua) are dropped: projects that
+    confine modules to controlled trees reject them, and LuaRocks-installed
+    modules resolve from the trees. Inherited LUA_PATH/LUA_CPATH entries are
+    kept when they are relative or inside a tree. Nothing is pinned unless
+    busted itself resolves inside a tree, so a busted installed elsewhere
+    keeps working with Lua's default paths. MUTATOR_LUA_NO_PIN=1 opts out.
+    """
+
+    if os.environ.get("MUTATOR_LUA_NO_PIN") == "1":
+        return None
+    trees = _rocks_trees()
+    if not trees or not any(
+        (Path(tree) / "share/lua/5.4/busted/runner.lua").is_file() for tree in trees
+    ):
+        return None
+
+    def keep(entry: str) -> bool:
+        return not entry.startswith("/") or any(
+            entry == tree or entry.startswith(tree + "/") for tree in trees
+        )
+
+    def filtered(*names: str) -> list[str]:
+        entries = []
+        for name in names:
+            value = os.environ.get(name)
+            if value:
+                entries.extend(entry for entry in value.split(";") if entry and keep(entry))
+        return entries
+
+    path = filtered("LUA_PATH_5_4", "LUA_PATH")
+    cpath = filtered("LUA_CPATH_5_4", "LUA_CPATH")
+    # Absolute module-directory templates: relative ones cannot be validated
+    # against the project root, and the worker rebase maps these into overlays.
+    root = directory.as_posix()
+    path += [f"{root}/?.lua", f"{root}/?/init.lua"]
+    cpath.append(f"{root}/?.so")
+    for tree in trees:
+        path += [f"{tree}/share/lua/5.4/?.lua", f"{tree}/share/lua/5.4/?/init.lua"]
+        cpath += [f"{tree}/lib/lua/5.4/?.so", f"{tree}/lib/lua/5.4/loadall.so"]
+    return ";".join(dict.fromkeys(path)), ";".join(dict.fromkeys(cpath))
+
+
+def lua_executable(command: Command) -> str:
+    """The interpreter a generated Lua command runs, past any env assignment prefix."""
+
+    if isinstance(command, str):
+        return command
+    index = 0
+    if command and command[0] == "env":
+        index = 1
+        while index < len(command) and "=" in command[index].split("/")[0]:
+            index += 1
+    return command[index]
+
+
+def _lua_literal(text: str) -> str:
+    # Long strings preserve backslashes, non-ASCII and spaces on every platform.
+    equals = "="
+    while "]" + equals + "]" in text:
+        equals += "="
+    return "[" + equals + "[" + text + "]" + equals + "]"
+
+
 def _lua_plan(root: Path, source: Path, busted_task: str | None = None) -> tuple[Command, Path]:
     """busted in the nearest `.busted` or rockspec directory, on Lua 5.4."""
 
@@ -307,9 +419,23 @@ def _lua_plan(root: Path, source: Path, busted_task: str | None = None) -> tuple
     lua = runners.lua_interpreter() or "lua5.4"
     # Preserve module paths supplied by a LuaRocks interpreter wrapper, then
     # run Busted in-process: its --lua re-exec loses quoting for spaced paths.
-    loader = _lua_worker_setup() + "pcall(require, 'luarocks.loader'); "
-    command = [
-        lua, "-e",
+    support_dir = Path(__file__).resolve().parent
+    loader = (
+        _lua_worker_setup()
+        + "local mutator_support = dofile(" + _lua_literal((support_dir / "lua_support.lua").as_posix()) + ")"
+        + "(" + _lua_literal(support_dir.as_posix()) + "); "
+        + "pcall(require, 'luarocks.loader'); "
+        + "mutator_support.install(); "
+    )
+    command = [lua]
+    pinned = _pinned_lua_paths(directory)
+    if pinned is not None:
+        # Pinned through the environment, not an in-process assignment, so
+        # nested test subprocesses inherit the same confined search path. The
+        # worker rebase in _prefer_worker_lua maps it into overlays.
+        command = ["env", f"LUA_PATH={pinned[0]}", f"LUA_CPATH={pinned[1]}", lua]
+    command += [
+        "-e",
         loader + "require('busted.runner')({standalone = false}); os.exit(0)",
         "--", "busted", "--ignore-lua",
     ]

@@ -38,6 +38,7 @@ def test_lua_plan_rebases_paths_before_loading_worker_sources(tmp_path, monkeypa
         "return function() assert(require('src.value') == 'worker', 'loaded original source'); "
         "print('worker source loaded') end\n", encoding="utf-8")
     paths = root.as_posix() + "/?.lua;" + cache.as_posix() + "/?.lua;" + root.as_posix() + "/"
+    monkeypatch.setenv("MUTATOR_LUA_NO_PIN", "1")
     for name in ("LUA_PATH", "LUA_PATH_5_4"):
         monkeypatch.setenv(name, paths)
     for name in ("LUA_CPATH", "LUA_CPATH_5_4"):
@@ -103,6 +104,7 @@ def test_lua_local_functions_are_private():
 
 
 def test_lua_tests_run_busted_in_the_nearest_busted_or_rockspec_directory(tmp_path, monkeypatch, runners):
+    monkeypatch.setenv("MUTATOR_LUA_NO_PIN", "1")
     monkeypatch.setattr(runners, "lua_interpreter", lambda: "/opt/lua 5.4/lua")
     root = tmp_path.resolve()
     (root / "pkg" / "src").mkdir(parents=True)
@@ -120,6 +122,7 @@ def test_lua_tests_run_busted_in_the_nearest_busted_or_rockspec_directory(tmp_pa
 
 
 def test_lua_falls_back_to_lua54_when_no_interpreter_is_found(tmp_path, monkeypatch, runners):
+    monkeypatch.setenv("MUTATOR_LUA_NO_PIN", "1")
     monkeypatch.setattr(runners, "lua_interpreter", lambda: None)
     source = tmp_path / "a.lua"
     source.write_text("", encoding="utf-8")
@@ -194,7 +197,7 @@ def test_busted_runs_with_a_spaced_interpreter_path(tmp_path, monkeypatch, runne
 
     monkeypatch.setattr(runners, "lua_interpreter", lambda: str(lua))
     command, directory = command_for(tmp_path, source, "lua", None)
-    assert command[0] == str(lua)
+    assert str(lua) in command
     assert command[-3:] == ["--", "busted", "--ignore-lua"]
     assert directory == project
 
