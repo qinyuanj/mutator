@@ -25,6 +25,7 @@ The first run of a tree executes every covered mutant. Start with the file you a
 ./mutator --use-existing-coverage   # read reports already on disk
 ./mutator --test-command "pytest -q tests/test_demo.py"
 ./mutator --max-workers 3 src/demo/core.clj
+./mutator --paranoid-workers        # pristine-check every worker, not once per command
 ```
 
 Once a snapshot exists, the next run is differential. It reruns survivors and every site in a function whose text changed. Killed mutants in an unchanged function stay killed. `--since-last-run` is that same selection. `--mutate-all` ignores it.
@@ -38,6 +39,11 @@ Mutants of one file run at the same time. The default is one worker per core. `-
 Each worker is a directory under `target/mutation-workers`. Lua schedules
 previous survivors first to reduce a long final tail; history changes execution
 order only. The file being mutated is a private copy. A module that reaches that file through a relative import is copied too, so Node resolves the import to the private copy. The rest of the tree is linked. The original source stays unchanged. Workers are removed after success, setup failure, or runtime failure.
+
+For Lua's shared worker pool, each distinct pristine command is checked once
+per run, not once per worker; every worker's overlay is still compared
+structurally before and after use. `--paranoid-workers` restores a full
+pristine run in every worker.
 
 The baseline still runs once, in the real tree, before any worker starts. The mutant command then runs inside the worker, in the same directory it would have used in the real tree, so a relative path such as `src` or `./pkg` refers to the overlay. A copy left under `target/mutator-backup/` by an interrupted older run is restored before a non-scan run.
 
@@ -130,6 +136,22 @@ path with spaces stays one argument. Lua uses crapper's interpreter discovery
 and LuaRocks wrapper module-path setup, then invokes Busted in that executable
 without Busted's shell-based `--lua` re-execution. Busted configuration and
 failure exit codes are preserved; baseline tests do not enable coverage.
+
+The generated Lua command confines module search paths to the LuaRocks trees
+reported by `luarocks config rocks_trees`, passed through the environment so
+nested test subprocesses inherit them. Inherited `LUA_PATH` entries survive
+when they are relative or inside a tree. Nothing is pinned unless busted
+itself resolves inside a tree; `MUTATOR_LUA_NO_PIN=1` opts out. The command's
+bootstrap also caches compiled chunks (`string.dump`, keyed by chunk name and
+content) and, on Lua 5.4 with Busted 2.3.0, replaces the per-element
+`debug.traceback` with a Lua-side version that formats only the frames busted
+keeps. `MUTATOR_LUA_NO_CACHE=1` and `MUTATOR_LUA_NO_FASTTRACE=1` disable each
+part; verbose failure output is unchanged outside one enumerable class
+(`docs/adr/0002-fasttrace-verbose-text.md`).
+
+A fresh Lua coverage run doubles as the test baseline: the suite already
+passed, so it does not run again, and the mutant timeout derives from the
+coverage-inclusive duration (`docs/adr/0001-coverage-run-as-baseline.md`).
 Use the matching sibling crapper checkout, which supplies this bootstrap helper.
 A `--test-command` you supply still runs through the shell as typed, with its
 quoted arguments intact. The runner returns the subprocess's original status;

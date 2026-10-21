@@ -18,8 +18,9 @@ penlight 1.15.0-1、mediator_lua 1.1.2-0（`~/.luarocks/lib/luarocks/rocks-5.4/`
    C 函数内的时间（`debug.traceback`）不可见。用 `os.clock` 包含式计时的实测份额
    为：getTrace 21.9 s（其中 traceback 21.7 s）、publish 0.49 s、rejectAll 0.057 s。
 3. 补丁 P1（Lua 侧只生成"会被保留的那几帧"的 traceback，格式逐字节对齐
-   `luaL_traceback`）把 `--list` 从约 33 s 降到约 17 s（-48%），全量套件从约
-   51 s 降到约 32 s（-37%），TAP 输出逐字节一致。
+   `luaL_traceback`）把 `--list` 从约 33 s 降到约 16 s（-49%），全量套件从约
+   52 s 降到约 31 s（-39%），`--list` 输出逐字节一致、全量 TAP 的 ok/not ok
+   名单逐字一致。
 4. `rejectAll` / mediator / `dirname` 缓存的优化方向都正确但量级在百分之一以下，
    不值得单独上游 PR；可作为同一 PR 的附属提交或不做。
 5. 上游（lunarmodules/busted）维护活跃（2026 年仍在合并 PR），但没有任何
@@ -234,11 +235,13 @@ monopoly（加载数百个模块后）单帧成本高、且采样剖析器看不
   `lauxlib.c`（`short_src:line: in <namewhat 'name' | main chunk | function
   <file:linedefined>>`、`(...tail calls...)`）。`core.lua:81` 改为
   `fasttrace.trimmed(level, false) or debug.traceback('', level)`。
-  唯二语义偏差：
-  (a) 5.4 的 `pushfuncname` 先查全局名后查 namewhat——若被保留帧的函数恰是
-  `package.loaded` 里的字段（如把模块表字段函数当 `it` 体），显示名不同；
-  (b) 保留帧恰为有 namewhat 的 main chunk 时同理。对 (b)，fasttrace 对 main
-  帧做一次单帧全局查找补正（见 4.1 验证）；对 (a)，实测 7229 次中 0 次差异。
+  唯一的语义偏差类：5.4 的 `pushfuncname` **先查全局名后查 namewhat**，P1
+  （approx 模式）跳过全局名查找——若某个被保留帧的函数恰是
+  `package.loaded` 里的值（如模块缓存把 chunk 函数存为
+  `package.loaded[modname]`），该帧显示名由 `function 'mod.name'` 退化为
+  namewhat/<file:line> 形式。fasttrace 另提供 exact 模式（对每个被保留帧做
+  一次单帧全局名查找）用于对拍验证，不作为生产配置（Lua 侧扫描
+  `package.loaded` 每次约 2 ms，会吃掉大部分收益）。
 - **P2** = P1 + `dirname` 按 source 字符串缓存（`core.lua:73/76`）。
 - **P3**：`core.lua:81` 改为先临时把 `registry._LOADED` 换成空表再
   `debug.traceback` 再恢复（pcall 包裹保异常安全）。思路是"跳过全局名查找"，
@@ -247,11 +250,22 @@ monopoly（加载数百个模块后）单帧成本高、且采样剖析器看不
 ### 4.1 文本等价性验证
 
 `/tmp/busted-research/rt-verify`：在 getTrace 里同时生成原版与 P1 版并逐字节
-比较，7229 次注册全量核对。首轮：approx 7228/7229、exact（含逐帧全局名查找的
-完全模式）7229/7229——唯一差异即 3.1 (b)：某 spec 顶层
-`local register = require('test.support...prompts')` 的 main chunk 帧，原版打印
-模块名 `function 'test.support...'`、P1 打印 `local 'register'`。修正（main 帧单帧
-全局查找）后第二轮：**7229/7229 全等，nil 回退 0 次**（`/tmp/busted-research/verify2.log`）。
+比较，7229 次注册全量核对（两轮，`verify.log`/`verify2.log`）：
+
+- **approx 模式（P1 生产配置，不做全局名查找）：7228/7229 一致**；唯一差异
+  样例：某 spec 顶层 `local register = require('test.support...prompts')`，
+  monopoly 的 cache_loader 把模块 chunk 函数本身存进了
+  `package.loaded['test.support...prompts']`，故 5.4 原版把该帧打印为
+  `in function 'test.support...prompts'`（global 查找优先于 namewhat），P1
+  打印为 `in local 'register'`。这正是 3.1 所述的偏差类 (a) 的实例：仅当
+  "被保留帧的函数恰是 package.loaded 里的值"时显示名不同。
+- **exact 模式（每个被保留帧都补一次全局名查找）：7229/7229 完全一致**，
+  nil 回退 0 次。即 P1 的所有差异都严格限定在上述一个可枚举的类里，
+  且只影响 traceback 文本中的函数名装饰，不影响 `short_src:currentline`。
+- 附带观察：P1 的格式等价于 **Lua 5.5** 的 `pushfuncname` 新顺序（namewhat
+  → main → global，commit 3dd8ea5）在"函数不在 package.loaded 中"时的输出。
+- 注意 TAP/`--list` 输出本身不含 traceback 文本（仅 verbose 失败/pending 才
+  打印），故输出 diff 无法区分 P1/P3，等价性只能靠上述对拍仪器验证。
 
 ### 4.2 基准结果
 
@@ -269,14 +283,20 @@ monopoly（加载数百个模块后）单帧成本高、且采样剖析器看不
 P1 与 P2 差 <3%（dirname 缓存无可见收益）；P3 与 P1 基本同速，但 P1 文本可验
 证等价，P3 不能。
 
-全量套件（2 轮 × 4 树，`/tmp/busted-research/bench-full.log`）：见下表。
+全量套件（2 轮 × 4 树，`/tmp/busted-research/bench-full.log` +
+`bench-full2.log`）：
 
-| 树 | CPU（2 轮） | ok / not ok |
-|---|---|---|
-| rt-orig | | |
-| rt-p1 | | |
-| rt-p2 | | |
-| rt-p3 | | |
+| 树 | CPU（2 轮） | 最小值 | ok / not ok（两轮一致） |
+|---|---|---|---|
+| rt-orig | 57.6 / 51.7 s | 51.7 s | 6259 / 3 |
+| rt-p1 | 32.2 / 31.4 s | **31.4 s（-39%）** | 6259 / 3 |
+| rt-p2 | 36.0 / 31.3 s | 31.3 s | 6259 / 3 |
+| rt-p3 | 31.4 / 32.7 s | 31.4 s | 6259 / 3 |
+
+全量模式插桩分解（rt-instr，一次，总 42.0 s CPU）：getTrace 14.7 s（n=7232，
+其中 traceback 14.5 s）、publish 0.40 s、rejectAll 0.075 s。n 仅比 `--list`
+多 3（恰为 3 个工件失败的错误路径调用）——无真实失败时注册期 trace 仍是
+getTrace 的绝对主体；若套件有失败，错误路径的 getTrace 同样走快路径。
 
 注意：全量模式下 rt-orig 基线出现 3 个固有失败（
 `TestLogWarnsHandler test_preserves_captured_info_lines_by_default` 等三个，
@@ -286,25 +306,35 @@ ok 6259 / not ok 3），失败信息为
 与外层 scratch 树不一致触发受控环境校验。这是**本实验装置（scratch 树 + 包装
 luarocks）的固定工件**，在基线与全部补丁树上应逐字节一致地复现；判定标准改
 为"P1/P2/P3 与 rt-orig 的 ok/notok 计数及 not ok 名单完全相同"。（真实环境下
-`~/dev/github/monopoly` 基线为 6261 ok / 0 not ok，与任务口径一致；scratch 快照
-里 6262 个测试中有一个是 pending，不计 ok。）
+`~/dev/github/monopoly` 基线为 6261 ok / 0 not ok，与任务口径一致；scratch 装置
+下 6262 = 6259 ok + 3 not ok，无 pending。）
 
 ### 4.3 正确性核对
 
-- `--list` 输出：rt-orig 与 rt-p1/p2/p3 各轮 6262 行，逐字节 diff 一致
-  （`/tmp/busted-research/out/list-*.diff`）。
-- 全量：各树 ok/notok 计数与 not ok 名单一致（工件三失败除外，见 4.2）。
+- `--list` 输出：3 轮 × 3 个补丁树与 rt-orig 全部 6262 行，`cmp` 逐字节一致
+  （`/tmp/busted-research/out/list-{orig,p1,p2,p3}-{1,2,3}.0`）。
+- 全量：两轮四树均为 ok 6259 / not ok 3，且 not ok 名单逐字一致（即上述三个
+  工件失败，无任何其它差异）。
 - busted 自身测试套件（dogfood，v2.3.0 源码树 + P1 补丁）：见 4.4。
 
 ### 4.4 busted 自身套件回归
 
-（待填：selftest-orig 与 selftest-p1 的失败集对比）
+对 v2.3.0 源码树打 P1 补丁后跑 busted 自己的套件（`selftest.sh`：Lua 5.4 +
+`~/.luarocks` 依赖，`bin/busted -o TAP`），`/tmp/busted-research/selftest-{orig,p1}.log`：
+
+- orig 与 p1 均为 **1675 ok / 2 not ok**，失败集逐字节一致：
+  `fixtures: path() returns the absolute fixture path [normalized]`——该测试用
+  正则 `^.-busted[/\]spec[/\]fixtures...` 匹配仓库路径，我们的 scratch 目录
+  不叫 `busted` 故必然失败（纯环境工件，与本补丁无关）。
+- 关键：`spec/cl_spec.lua:400-427` 的三条 "Tests stack trackback" 格式断言
+  （`--verbose` 下失败输出的 `stack traceback:` 文本逐字一致）在 p1 下通过，
+  证明 P1 的 Lua 侧格式复刻在真实失败路径上与 `luaL_traceback` 输出一致。
 
 ## 5. 语义风险清单
 
 | 补丁 | 可见行为变化 | 暴露面 |
 |---|---|---|
-| P1 fasttrace | 失败/pending 输出中的 traceback 文本理论上可能不同：(a) 被保留帧函数恰为 `package.loaded` 字段时显示名由 `function 'mod.fn'` 变为 `<file:line>` 形式（5.4 原版优先全局名）；(b) 同一 trace 被 fennel/moonscript loader 二次重写时输入不同（输入等价则输出等价） | 仅 `--verbose` 下 pending/失败的 traceback 文本；已用 monopoly 7229 次注册全量逐字节验证 0 差异；busted 自身 `cl_spec.lua:400-427` 格式测试通过 |
+| P1 fasttrace | 失败/pending 输出中的 traceback 文本理论上可能不同：被保留帧函数恰为 `package.loaded` 里的值时显示名由 `function 'mod.fn'` 退化为 namewhat/`<file:line>` 形式（5.4 原版优先全局名）；同一 trace 被 fennel/moonscript loader 二次重写时输入不同（输入等价则输出等价） | 仅 `--verbose` 下 pending/失败的 traceback 文本；已用 monopoly 7229 次注册全量对拍（7228/7229，唯一差异即此类；exact 模式 7229/7229）；busted 自身 `cl_spec.lua:400-427` 格式测试通过 |
 | P2 dirname 缓存 | 无（纯函数缓存；source 串为键） | 无 |
 | P3 _LOADED 交换 | traceback 文本**保证可能不同**（全局名全部消失）；且若 traceback 期间协程切换会看到被换的注册表（pcall 内不 yield，安全） | 所有打印 traceback 的场景——不建议上游 |
 | rejectAll 预计算 | 运行中新 `busted.register` 的描述符不被拒绝 | 仅第三方 helper 动态注册 |
@@ -314,7 +344,8 @@ luarocks）的固定工件**，在基线与全部补丁树上应逐字节一致�
 ## 6. 上游化建议
 
 1. **P1 值得提 PR**（lunarmodules/busted）：动机可引 Lua 官方 commit 3dd8ea5
-   的提交信息 + 本研究的复现数据（6262 测试项目 `--list` 33 s → 17 s）。需附带：
+   的提交信息 + 本研究的复现数据（6262 测试项目 `--list` 33 s → 16 s、全量
+   52 s → 31 s）。需附带：
    对 `cl_spec.lua` traceback 测试保持通过；在 spec 里加一个"注册 trace 与
    `debug.traceback`+trim 等价"的对拍测试（可在测试内对比两者文本）。CI 矩阵
    覆盖 5.1–5.5+LuaJIT，需要注意：LuaJIT 与 5.1 的 `luaL_traceback` 没有
@@ -328,6 +359,17 @@ luarocks）的固定工件**，在基线与全部补丁树上应逐字节一致�
    `mediator.lua:110` 的 `parent` 全局 bug 可顺手报告但不必指望合并。
 5. 维护者合并节奏：简单修复类 PR 当日~数日合并（#766/#780），较大功能 PR 可能
    积压数月（#753 用了 14 个月）。P1 属中等复杂度，预期需要 1–2 轮 review。
+
+### 6.1 对 mutator 的落地路径
+
+monopoly 守卫允许 worker（mutation 工作副本）内的搜索模板
+（`cache_loader.lua:148-149` `in_worker` 分支）。因此 mutator 可以在生成 worker
+时把打过 P1 的 busted 树拷进 worker 内（如 `worker/.mutator-busted/`；注意
+`_lua_worker_setup`（`src/mutator/runner.py:293-295`）不对 `.toolcache` 路径做
+worker 重定基，故不要放 `.toolcache` 下）并在该 worker 的 `LUA_PATH` 前置之，
+无需等上游、也不触碰 `~/.luarocks`；本研究已用同形态（额外 rocks-tree 根）
+证明装载与结果正确性。短期推荐此路径 + 并行提上游 PR；上游合并后回到官方
+luarocks 钉版即可。
 
 ## 7. 复现材料索引（本机 /tmp，易失）
 
