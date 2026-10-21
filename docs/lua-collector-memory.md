@@ -36,7 +36,7 @@ not process RSS or proof of real-project peak memory reduction.
 
 The fixture also tests IDs through 79, sparse memberships with gaps larger than
 a byte, repeated spec IDs and saves, and unknown versus outside-spec attribution.
-Collector integration tests run with both pure LuaCov and native cluacov.
+Collector integration tests require native cluacov 1.0.0, because the pure LuaCov configuration is no longer supported.
 
 ## Real-project harness
 

@@ -127,7 +127,7 @@ The baseline command has to pass before any mutant runs. A mutant's timeout is t
 | TypeScript | `npm test` | nearest `package.json` |
 | Rust | `cargo test` | nearest `Cargo.toml` |
 | Python | the project's `.venv` or `venv` Python running `pytest`, or `unittest discover` | nearest project file |
-| Lua | native Lua 5.4 loading `busted.runner` with `--ignore-lua` | nearest `.busted` or rockspec |
+| Lua | native Lua 5.4 loading `busted.runner` with `--ignore-lua`, with cluacov 1.0.0 required | nearest `.busted` or rockspec |
 
 Built-in plans run as argument vectors without a shell, so an interpreter
 path with spaces stays one argument. Lua uses crapper's interpreter discovery
@@ -219,7 +219,10 @@ is treated as uncovered, and the run says so.
 Native Windows runs work without Developer Mode or administrator symlink
 rights: workers fall back to isolated copies on missing privilege. Install
 Python and each project's native test tools. For Lua, use a native Lua 5.4
-executable with Busted, LuaCov, and luacov-reporter-lcov in its LuaRocks tree.
+executable with Busted, LuaCov, cluacov 1.0.0, and luacov-reporter-lcov in its LuaRocks tree.
+LuaCov switches to cluacov's C hook and active-line analysis whenever it loads,
+which changes which lines count, so a missing or other cluacov version stops
+Lua coverage before any test runs.
 Make Lua available on PATH and expose that tree through LUA_PATH and LUA_CPATH
 (or a LuaRocks interpreter wrapper whose module paths crapper can recover).
 From PowerShell, install and invoke mutator with the worktree's Python:
@@ -246,7 +249,7 @@ WSL2 with Ubuntu is also supported:
    ```
 
 3. Run `mutator/scripts/setup-ubuntu.sh`. It installs Python, Lua 5.4,
-   busted, luacov, and luacov-reporter-lcov, then creates `.venv`.
+   busted, luacov, cluacov 1.0.0, and luacov-reporter-lcov, then creates `.venv`.
 4. Edit in VS Code with the WSL extension (`code .` from Ubuntu).
 
 mutator warns when a WSL project is under `/mnt/`; native Windows runs do not

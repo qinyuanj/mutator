@@ -41,37 +41,35 @@ def project(tmp_path):
     return directory, source
 
 
-@pytest.fixture(params=["pure", "cluacov"])
-def toolchain(request, monkeypatch):
+@pytest.fixture
+def toolchain(monkeypatch):
     runners = ensure_crapper().runners
     lua = runners.lua_interpreter()
     if lua is None:
         pytest.skip("Lua 5.4 unavailable")
-    setup = runners._lua_package_setup(lua)
-    if request.param == "pure":
-        setup += "package.preload['cluacov.version'] = function() error('pure LuaCov test') end; "
+    # A local rock tree can provide the required native hook without changing
+    # or executing any project that owns that tree.
+    checkout = Path(__file__).resolve().parents[1]
+    git_pointer = checkout / '.git'
+    if git_pointer.is_file():
+        git_directory = Path(git_pointer.read_text(encoding='utf-8').strip().removeprefix('gitdir: '))
+        if not git_directory.is_absolute():
+            git_directory = checkout / git_directory
+        checkout = git_directory.resolve().parents[2]
+    tree = checkout.parent / "monopoly" / ".toolcache" / "luarocks"
+    if tree.is_dir():
+        setup = f"package.path = {json.dumps(tree.as_posix() + '/share/lua/5.4/?.lua;')} .. package.path; "
+        extension = "dll" if os.name == "nt" else "so"
+        setup += f"package.cpath = {json.dumps(tree.as_posix() + '/lib/lua/5.4/?.' + extension + ';')} .. package.cpath; "
     else:
-        # A local rock tree can provide the optional native hook without
-        # changing or executing any project that owns that tree.
-        checkout = Path(__file__).resolve().parents[1]
-        git_pointer = checkout / '.git'
-        if git_pointer.is_file():
-            git_directory = Path(git_pointer.read_text(encoding='utf-8').strip().removeprefix('gitdir: '))
-            if not git_directory.is_absolute():
-                git_directory = checkout / git_directory
-            checkout = git_directory.resolve().parents[2]
-        tree = checkout.parent / "monopoly" / ".toolcache" / "luarocks"
-        if tree.is_dir():
-            setup += f"package.path = {json.dumps(tree.as_posix() + '/share/lua/5.4/?.lua;')} .. package.path; "
-            extension = "dll" if os.name == "nt" else "so"
-            setup += f"package.cpath = {json.dumps(tree.as_posix() + '/lib/lua/5.4/?.' + extension + ';')} .. package.cpath; "
+        setup = runners._lua_package_setup(lua)
     probe = CommandRunner().run(
         [lua, "-e", setup + "require('busted.runner'); require('luacov.reporter.lcov'); "
-         + ("require('cluacov.hook'); " if request.param == "cluacov" else "") + "print('ready')"],
+         + "require('cluacov.hook'); print('ready')"],
         Path(__file__).parent, 15,
     )
     if probe.code != 0:
-        pytest.skip(f"Busted/LuaCov toolchain unavailable: {probe.output}")
+        pytest.skip(f"Busted/LuaCov/cluacov toolchain unavailable: {probe.output}")
     monkeypatch.setattr(runners, "_lua_package_setup", lambda _: setup)
     return runners
 
@@ -179,6 +177,20 @@ def test_failed_suite_invalidates_existing_cache_and_lcov(project, toolchain):
     assert not report.exists()
     assert not (report.parent / "spec-coverage.json").exists()
     assert not (report.parent / "spec-coverage.pending.json").exists()
+    assert load(root, source) is None
+
+
+def test_missing_cluacov_blocks_collection_before_tests(project, toolchain, monkeypatch):
+    root, source = project
+    collect(root, source)
+    report = toolchain._coverage_report(root, root, "lua")
+    ran = []
+    monkeypatch.setattr(toolchain, "lua_cluacov_version", lambda lua: "")
+    monkeypatch.setattr(toolchain, "run_shell", lambda *args: ran.append(args) or 0)
+    with pytest.raises(toolchain.CoverageError, match="requires cluacov 1.0.0"):
+        collect(root, source)
+    assert ran == []
+    assert not report.exists()
     assert load(root, source) is None
 
 

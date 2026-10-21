@@ -14,6 +14,7 @@ sudo apt-get install -y python3 python3-venv build-essential \
 
 sudo luarocks --lua-version=5.4 install busted
 sudo luarocks --lua-version=5.4 install luacov
+sudo luarocks --lua-version=5.4 install cluacov 1.0.0-1
 sudo luarocks --lua-version=5.4 install luacov-reporter-lcov
 
 python3 -m venv .venv

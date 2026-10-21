@@ -195,6 +195,9 @@ def collect(
     report.parent.mkdir(parents=True, exist_ok=True)
     for artifact in (report, stats, publication, pending):
         artifact.unlink(missing_ok=True)
+    # LuaCov's C hook changes which lines count, so a missing or other cluacov
+    # version cannot produce the baseline this index was measured against.
+    runners.require_lua_cluacov(command[0])
     selected = [source] if source_files is None else source_files
     config.write_text(runners.lua_coverage_config(stats, report, selected, directory), encoding="utf-8")
     run = list(command)
