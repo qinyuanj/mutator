@@ -6,7 +6,7 @@ import hashlib
 import json
 import math
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 from mutator.crapper_link import ensure_crapper
@@ -30,8 +30,9 @@ class LuaCoverageIndex:
     overhead: float = 0.0
     # seconds: wall time of the fresh suite run; fresh: that run happened in
     # this process, so the pristine suite is known to pass (baseline seeding).
-    seconds: float = 0.0
-    fresh: bool = False
+    # Both describe the collecting run, not the index, so they skip equality.
+    seconds: float = field(default=0.0, compare=False)
+    fresh: bool = field(default=False, compare=False)
 
     def select(self, source: Path, line: int) -> list[str] | None:
         key = _canonical(source)
