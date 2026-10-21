@@ -233,17 +233,6 @@ test process's status, while the mutation CLI returns its aggregate statuses
 (`0`, `2`, or `3`) described above. A timed-out test command is killed by
 process group, which cleans up its descendants.
 
-## macOS
-
-macOS uses the existing POSIX design: argument vectors run directly, custom
-command strings run through the shell, and each test process starts a new
-session. On timeout the runner kills the process group to clean up descendants.
-Successful runs leave independent descendants alone. Workers use symlink
-overlays with private mutant/configuration/Node importer copies, then unlink
-the overlay after completion or failure. Install Python and the project's test
-tools as on Linux. This design is shared with Linux; macOS execution was not
-part of this change's validation.
-
 ## Development
 
 ```bash

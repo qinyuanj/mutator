@@ -474,9 +474,9 @@ def test_streamed_publication_escapes_source_names(project, toolchain):
     assert index.select(unusual, 6) == ['spec/second_spec.lua']
 
 
-def test_lua_literal_handles_windows_paths_and_delimiters(project, toolchain):
+def test_lua_literal_handles_backslashes_and_delimiters(project, toolchain):
     root, _source = project
-    value = "C:\\project space\\some]=]file]==]name.lua"
+    value = "/tmp/project space\\some]=]file]==]name.lua"
     lua = toolchain.lua_interpreter()
     result = CommandRunner().run([lua, "-e", "io.write(" + _literal(value) + ")"], root, 5)
     assert result.code == 0

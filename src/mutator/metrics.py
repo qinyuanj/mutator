@@ -272,8 +272,8 @@ def _write_namespace(
     text = _render_snapshot(namespace, _snapshot_source(fresh, kept_forms, file_key), rendered, merged)
     temporary = None
     try:
-        # Same directory keeps replacement on one filesystem. Close before
-        # replacing so this works on Windows as well as POSIX.
+        # Same directory keeps replacement on one filesystem; close before
+        # replacing so the snapshot is fully written.
         with NamedTemporaryFile(
             mode="w", encoding="utf-8", dir=path.parent, suffix=".tmp", delete=False
         ) as stream:
