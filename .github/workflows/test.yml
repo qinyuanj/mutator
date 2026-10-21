@@ -34,9 +34,12 @@ jobs:
           echo "LUA_CPATH=$HOME/.luarocks/lib/lua/5.4/?.so;;" >> "$GITHUB_ENV"
       - name: Install Busted and Lua coverage tools
         run: |
-          for rock in busted luacov luacov-reporter-lcov "cluacov 1.0.0-1"; do
+          for rock in busted luacov luacov-reporter-lcov; do
             luarocks --tree="$HOME/.luarocks" install "$rock"
           done
+          # cluacov is not on the public server manifest; pin it from source.
+          luarocks --tree="$HOME/.luarocks" install \
+            https://raw.githubusercontent.com/lunarmodules/cluacov/1.0.0/cluacov-1.0.0-1.rockspec
           export LUA_PATH="$HOME/.luarocks/share/lua/5.4/?.lua;$HOME/.luarocks/share/lua/5.4/?/init.lua;;"
           export LUA_CPATH="$HOME/.luarocks/lib/lua/5.4/?.so;;"
           lua -e "require('busted.runner'); require('luacov'); require('luacov.reporter.lcov')"
