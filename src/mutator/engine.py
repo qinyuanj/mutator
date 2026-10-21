@@ -278,6 +278,7 @@ def _apply_selected(
     busted_task,
     lua_coverage=None,
     worker_pool=None,
+    select_specs: bool = False,
 ) -> RunResult | None:
     if not selected:
         return None
@@ -287,6 +288,11 @@ def _apply_selected(
     else:
         command, cwd = test_plan(root, path, language, test_command, busted_task)
     cache_key = (_command_key(command), str(cwd))
+    if standard_lua and lua_coverage is not None and getattr(lua_coverage, "fresh", False):
+        # The fresh coverage run already proved the pristine suite passes, so
+        # the baseline does not run again. Its coverage-inflated duration
+        # becomes the timeout base (docs/adr/0001-coverage-run-as-baseline.md).
+        baselines.setdefault(cache_key, (True, lua_coverage.seconds, ""))
     _remember_baseline(baselines, cache_key, runner, command, cwd)
     ok, seconds, tail = baselines[cache_key]
     if not ok:
@@ -296,11 +302,13 @@ def _apply_selected(
     check_command, check_timeout = command, timeout
     if standard_lua:
         command = [*command, "--no-keep-going"]
-        if lua_coverage is not None:
+        if select_specs and lua_coverage is not None:
             plans, check_command, check_timeout = _lua_plans(
                 lua_coverage, path, selected, command, timeout, timeout_factor, runner, baselines
             )
-    confirmation = (command, timeout) if standard_lua and lua_coverage is not None else None
+    confirmation = (
+        (command, timeout) if standard_lua and select_specs and lua_coverage is not None else None
+    )
     try:
         run_mutants(
             root,
@@ -357,6 +365,7 @@ def mutate_file(
     busted_task: str | None = None,
     lua_coverage: LuaCoverageIndex | None = None,
     worker_pool: WorkerPool | None = None,
+    select_specs: bool = False,
 ) -> RunResult:
     """Mutate one file and write its namespaces into `.metrics/mutate`."""
 
@@ -397,6 +406,7 @@ def mutate_file(
         busted_task,
         lua_coverage,
         worker_pool,
+        select_specs,
     )
     if failure is not None:
         return failure

@@ -72,6 +72,9 @@ Options:
                                 shared state can change mutation outcomes.
   --full-suite                  Run all tests for every mutant (the default).
                                 Cannot be combined with --select-specs.
+  --paranoid-workers            Run the pristine worker check in every worker
+                                instead of once per command. The other workers
+                                are always compared structurally.
   --timings                     Print phase totals and mean mutant duration.
   --verbose                     Print each test command and each mutant.
 
@@ -136,6 +139,7 @@ class Options:
     timings: bool = False
     full_suite: bool = False
     select_specs: bool = False
+    paranoid_workers: bool = False
 
 
 def _take(args: list[str], index: int, option: str) -> str:
@@ -246,6 +250,10 @@ def parse_args(argv: list[str] | None = None) -> Options:
                 continue
             if arg == "--full-suite":
                 options.full_suite = True
+                index += 1
+                continue
+            if arg == "--paranoid-workers":
+                options.paranoid_workers = True
                 index += 1
                 continue
             if arg == "--timings":
@@ -411,13 +419,11 @@ def _prepare_coverage(options: Options, root: Path, files: list[Path]) -> dict:
     crapper = ensure_crapper()
     indexes = {}
     remaining = files
-    if options.select_specs and not (options.full_suite or options.test_command or options.coverage_command):
+    if not (options.test_command or options.coverage_command):
         from mutator.lua_coverage import collect
 
         lua_files = [path for path in files if path.suffix == ".lua"]
-        for directory in crapper.runners.lua_roots(root, lua_files):
-            targets = [path for path in lua_files
-                       if crapper.runners.lua_roots(root, [path])[0] == directory]
+        for directory, targets in crapper.runners.lua_modules(root, lua_files).items():
             indexes[directory] = collect(
                 root, targets[0], busted_task=options.busted_task,
                 reuse=options.use_existing_coverage, verbose=options.verbose, source_files=targets,
@@ -504,11 +510,11 @@ def _mutate_files(options: Options, root: Path, files: list[Path], indexes: dict
     baseline_failed = False
     survived = False
     lua_sources = [path for path in files if path.suffix == ".lua"]
-    with WorkerPool(root, lua_sources) as worker_pool:
+    with WorkerPool(root, lua_sources, check_each_worker=options.paranoid_workers) as worker_pool:
         for path in files:
             index = None
             if indexes and path.suffix == ".lua":
-                directory = ensure_crapper().runners.lua_roots(root, [path])[0]
+                directory = next(iter(ensure_crapper().runners.lua_modules(root, [path])))
                 index = indexes.get(directory)
             result = mutate_file(
                 path,
@@ -526,6 +532,7 @@ def _mutate_files(options: Options, root: Path, files: list[Path], indexes: dict
                 busted_task=options.busted_task,
                 lua_coverage=index,
                 worker_pool=worker_pool if path.suffix == ".lua" else None,
+                select_specs=options.select_specs,
             )
             outcome = _record(result, forms, written)
             if outcome == "baseline":
@@ -586,7 +593,11 @@ def run(argv: list[str] | None = None) -> int:
             return 0
     timings.reset()
     with timings.measure("coverage"):
-        indexes = _prepare_coverage(options, root, files)
+        try:
+            indexes = _prepare_coverage(options, root, files)
+        except ensure_crapper().runners.CoverageError as exc:
+            print(exc, file=sys.stderr)
+            return 2
     if options.scan:
         return _scan(options, root, files)
     with timings.measure("mutation-run"):

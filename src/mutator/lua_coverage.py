@@ -6,11 +6,11 @@ import hashlib
 import json
 import math
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 from mutator.crapper_link import ensure_crapper
-from mutator.runner import CommandRunner, test_plan
+from mutator.runner import CommandRunner, lua_executable, test_plan
 
 
 _VERSION = 2
@@ -28,6 +28,11 @@ class LuaCoverageIndex:
     lines: dict[str, dict[int, set[str]]]
     fallback: dict[str, set[int]]
     overhead: float = 0.0
+    # seconds: wall time of the fresh suite run; fresh: that run happened in
+    # this process, so the pristine suite is known to pass (baseline seeding).
+    # Both describe the collecting run, not the index, so they skip equality.
+    seconds: float = field(default=0.0, compare=False)
+    fresh: bool = field(default=False, compare=False)
 
     def select(self, source: Path, line: int) -> list[str] | None:
         key = _canonical(source)
@@ -197,7 +202,7 @@ def collect(
         artifact.unlink(missing_ok=True)
     # LuaCov's C hook changes which lines count, so a missing or other cluacov
     # version cannot produce the baseline this index was measured against.
-    runners.require_lua_cluacov(command[0])
+    runners.require_lua_cluacov(lua_executable(command))
     selected = [source] if source_files is None else source_files
     config.write_text(runners.lua_coverage_config(stats, report, selected, directory), encoding="utf-8")
     run = list(command)
@@ -224,12 +229,14 @@ def collect(
         raw = json.loads(pending.read_text(encoding="utf-8"))
         index = _decode(_mapping(raw), directory, command, published=False)
         index.overhead = max(0.0, result.seconds - sum(index.specs.values()))
+        index.seconds = result.seconds
+        index.fresh = True
         if not stats.is_file() or stats.stat().st_size == 0:
             raise ValueError("LuaCov stats missing or empty after suite")
     except (OSError, ValueError, TypeError) as exc:
         pending.unlink(missing_ok=True)
         raise runners.CoverageError(f"Invalid Lua spec coverage in {directory}: {exc}") from exc
-    _, lcov_command = runners.lua_coverage_commands(command[0], config)
+    _, lcov_command = runners.lua_coverage_commands(lua_executable(command), config)
     try:
         runners._record_lua_lcov(directory, result.code, stats, report, lcov_command)
         fresh = runners._fresh_lcov(report, directory)

@@ -29,6 +29,8 @@ COMMAND = ["lua54", "-e", "run_busted()", "--", "busted", "--ignore-lua", "--run
 
 
 class Index:
+    fresh = False
+
     def __init__(self, directory, selections=None):
         self.directory = directory
         self.command = list(COMMAND)
@@ -73,7 +75,7 @@ def mutate(source, root, runner, **kwargs):
     options = dict(
         runner=runner, covered_lines={3, 6}, ignore_coverage=False,
         mutate_all=True, lines=None, test_command=None, timeout_factor=10,
-        mutation_warning=100, baselines={}, max_workers=2,
+        mutation_warning=100, baselines={}, max_workers=2, select_specs=True,
     )
     options.update(kwargs)
     return mutate_file(source, root, **options)

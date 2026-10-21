@@ -333,7 +333,9 @@ def test_existing_real_fixture_keeps_coverage(tmp_path, toolchain):
     root = tmp_path / "fixture"
     shutil.copytree(FIXTURE, root)
     source = root / "src" / "calc" / "init.lua"
-    index = collect(root, source)
+    # LuaCov records only the selected sources; the CLI passes every Lua file
+    # of the module, so the sibling implementation file is covered too.
+    index = collect(root, source, source_files=[source, root / "src" / "calc" / "util.lua"])
     assert index.select(source, 8) == ["spec/calc_spec.lua"]
     fresh = toolchain._fresh_lcov(toolchain._coverage_report(root, root, "lua"), root)
     assert any(Path(name).name == "util.lua" for name in fresh)

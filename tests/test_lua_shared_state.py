@@ -127,9 +127,10 @@ def test_opted_in_selection_can_kill_full_suite_survivor_with_shared_state(tmp_p
         mutation_warning=100, max_workers=1,
     )
     full = mutate_file(source, tmp_path, baselines={}, **options)
-    # Supplying an index opts into selection; shared-state specs violate its
-    # independence requirement even when every pristine subset check passes.
-    selected = mutate_file(source, tmp_path, baselines={}, lua_coverage=index, **options)
+    # Opting into selection with shared-state specs violates its independence
+    # requirement even when every pristine subset check passes.
+    selected = mutate_file(source, tmp_path, baselines={}, lua_coverage=index,
+                           select_specs=True, **options)
 
     assert not full.baseline_failed, full.baseline_message
     assert not selected.baseline_failed, selected.baseline_message

@@ -98,6 +98,7 @@ def test_busted_task_is_a_single_argv_entry_in_the_generated_command(tmp_path, m
     import mutator.crapper_link as link
 
     crapper = link.ensure_crapper()
+    monkeypatch.setenv("MUTATOR_LUA_NO_PIN", "1")
     monkeypatch.setattr(crapper.runners, "lua_interpreter", lambda: "/opt/lua 5.4/lua")
     source = tmp_path / "a.lua"
     source.write_text("", encoding="utf-8")
