@@ -19,8 +19,8 @@ def test_shared_cached_result_keeps_full_suite_kills(tmp_path):
         pytest.skip("Lua 5.4 unavailable")
     runner = CommandRunner()
     probe = runner.run(
-        [lua, "-e", runners._lua_package_setup(lua)
-         + "require('busted.runner'); require('luacov.reporter.lcov'); require('dkjson')"],
+        [lua, "-e",
+         "require('busted.runner'); require('luacov.reporter.lcov'); require('dkjson')"],
         tmp_path, 15,
     )
     if probe.code != 0:
@@ -80,8 +80,8 @@ def test_opted_in_selection_can_kill_full_suite_survivor_with_shared_state(tmp_p
         pytest.skip("Lua 5.4 unavailable")
     runner = CommandRunner()
     probe = runner.run(
-        [lua, "-e", runners._lua_package_setup(lua)
-         + "require('busted.runner'); require('luacov.reporter.lcov'); require('dkjson')"],
+        [lua, "-e",
+         "require('busted.runner'); require('luacov.reporter.lcov'); require('dkjson')"],
         tmp_path, 15,
     )
     if probe.code != 0:

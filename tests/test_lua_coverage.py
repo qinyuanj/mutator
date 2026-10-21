@@ -59,10 +59,9 @@ def toolchain(monkeypatch):
     tree = checkout.parent / "monopoly" / ".toolcache" / "luarocks"
     if tree.is_dir():
         setup = f"package.path = {json.dumps(tree.as_posix() + '/share/lua/5.4/?.lua;')} .. package.path; "
-        extension = "dll" if os.name == "nt" else "so"
-        setup += f"package.cpath = {json.dumps(tree.as_posix() + '/lib/lua/5.4/?.' + extension + ';')} .. package.cpath; "
+        setup += f"package.cpath = {json.dumps(tree.as_posix() + '/lib/lua/5.4/?.so;')} .. package.cpath; "
     else:
-        setup = runners._lua_package_setup(lua)
+        setup = ""
     probe = CommandRunner().run(
         [lua, "-e", setup + "require('busted.runner'); require('luacov.reporter.lcov'); "
          + "require('cluacov.hook'); print('ready')"],
@@ -70,7 +69,6 @@ def toolchain(monkeypatch):
     )
     if probe.code != 0:
         pytest.skip(f"Busted/LuaCov/cluacov toolchain unavailable: {probe.output}")
-    monkeypatch.setattr(runners, "_lua_package_setup", lambda _: setup)
     return runners
 
 
@@ -97,9 +95,7 @@ def test_real_suite_attributes_loads_and_independent_functions(project, toolchai
 
 def test_selected_unrequired_source_and_scope_cache_identity(project, toolchain):
     root, source = project
-    # Native Lua uses narrow paths; GitHub's Windows runner cannot open the
-    # non-ASCII variant. The delimiter/quote escaping under test stays ASCII.
-    suffix = "unused ' ]==].lua" if os.name == "nt" else "unused ' ü]==].lua"
+    suffix = "unused ' ü]==].lua"
     unused = root / "src" / suffix
     unused.write_text("local M = {}\nfunction M.zero()\n return 99\nend\nreturn M\n", encoding="utf-8")
     broken = root / ".claude" / "worktrees" / "broken"
@@ -436,9 +432,8 @@ sample()
 print(string.format('retained_kib=%.1f peak_kib=%.1f', retained, peak))
 """, encoding="utf-8")
     lua = toolchain.lua_interpreter()
-    setup = toolchain._lua_package_setup(lua)
     result = CommandRunner().run(
-        [lua, "-e", setup + "assert(loadfile(arg[1]))(table.unpack(arg, 2))",
+        [lua, "-e", "assert(loadfile(arg[1]))(table.unpack(arg, 2))",
          "--", str(script), str(collector), str(destination), str(line_count), str(spec_count)],
         tmp_path, 30,
     )
@@ -469,7 +464,7 @@ def test_packed_memberships_cross_byte_and_word_boundaries(tmp_path, toolchain):
 def test_streamed_publication_escapes_source_names(project, toolchain):
     root, source = project
     # See the narrow-path note above; quotes and brackets still exercise escaping.
-    name = 'calc [quoted].lua' if os.name == 'nt' else 'calc [quoted] ü.lua'
+    name = 'calc [quoted] ü.lua'
     unusual = source.with_name(name)
     source.rename(unusual)
     for spec in (root / 'spec').glob('*.lua'):

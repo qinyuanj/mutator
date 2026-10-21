@@ -25,106 +25,6 @@ class CommandResult:
     launch_error: OSError | None = None
 
 
-if os.name == "nt":
-    import ctypes
-    from ctypes import wintypes
-
-    # The SetInformationJobObject info class that carries LimitFlags.
-    JobObjectExtendedLimitInformation = 9
-    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
-
-    class _BasicLimit(ctypes.Structure):
-        _fields_ = [
-            ("PerProcessUserTimeLimit", ctypes.c_longlong),
-            ("PerJobUserTimeLimit", ctypes.c_longlong),
-            ("LimitFlags", ctypes.c_ulong),
-            ("MinimumWorkingSetSize", ctypes.c_size_t),
-            ("MaximumWorkingSetSize", ctypes.c_size_t),
-            ("ActiveProcessLimit", ctypes.c_ulong),
-            ("Affinity", ctypes.c_size_t),
-            ("PriorityClass", ctypes.c_ulong),
-            ("SchedulingClass", ctypes.c_ulong),
-        ]
-
-    class _IoCounters(ctypes.Structure):
-        _fields_ = [(name, ctypes.c_ulonglong) for name in (
-            "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
-            "ReadTransferCount", "WriteTransferCount", "OtherTransferCount",
-        )]
-
-    class _ExtendedLimitInformation(ctypes.Structure):
-        _fields_ = [
-            ("basic", _BasicLimit),
-            ("io", _IoCounters),
-            ("ProcessMemoryLimit", ctypes.c_size_t),
-            ("JobMemoryLimit", ctypes.c_size_t),
-            ("PeakProcessMemoryUsed", ctypes.c_size_t),
-            ("PeakJobMemoryUsed", ctypes.c_size_t),
-        ]
-
-    _kernel32 = ctypes.windll.kernel32
-    _kernel32.CreateJobObjectW.restype = wintypes.HANDLE
-    _kernel32.SetInformationJobObject.argtypes = [
-        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, ctypes.c_ulong,
-    ]
-    _kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
-    _kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
-    _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-
-
-def _windows_job(process: subprocess.Popen) -> int | None:
-    """A kill-on-close Job Object holding the process and its descendants.
-
-    Windows has no process groups, so a shell command times out by terminating
-    a Job: every descendant joins it at spawn, and none outlives the handle.
-    """
-
-    job = _kernel32.CreateJobObjectW(None, None)
-    # CPython exposes the child's OS handle only as the private Popen._handle
-    # (there is no public accessor, and re-opening by pid races pid reuse).
-    # The getattr guard degrades to taskkill's tree walk alone rather than
-    # failing if a runtime lacks the attribute.
-    handle = getattr(process, "_handle", None)
-    if not job or handle is None:
-        if job:
-            _kernel32.CloseHandle(job)
-        return None
-    info = _ExtendedLimitInformation()
-    # KILL_ON_JOB_CLOSE is crash protection, and deliberately asymmetric with
-    # POSIX: descendants still alive when the runner exits are killed even
-    # after a successful run, while POSIX leaves them.
-    info.basic.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-    sized = ctypes.sizeof(info)
-    if not _kernel32.SetInformationJobObject(
-        job, JobObjectExtendedLimitInformation, ctypes.byref(info), sized
-    ):
-        _kernel32.CloseHandle(job)
-        return None
-    if not _kernel32.AssignProcessToJobObject(job, handle):
-        _kernel32.CloseHandle(job)
-        return None
-    return job
-
-
-def _windows_kill(pid: int, job: int | None) -> None:
-    """Terminate the tree rooted at the shell command.
-
-    taskkill walks the parent chain, so it must run while the tree is intact:
-    it reaches descendants that broke away from the Job (the venv python.exe
-    redirector re-executes the real interpreter outside it). Terminating the
-    Job afterwards cleans up anything taskkill missed.
-
-    Known limitation: if the timed-out shell has already exited, breakaway
-    descendants escape both taskkill's tree walk (the chain it walks is
-    broken) and the Job (they are not members), so they can outlive the
-    timeout.
-    """
-
-    subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True)
-    if job:
-        _kernel32.TerminateJobObject(job, 124)
-
-
 def _worker_home(cwd: Path) -> Path | None:
     """The overlay root when cwd is inside target/mutation-workers."""
 
@@ -235,22 +135,15 @@ class CommandRunner:
             return CommandResult(
                 code=127, timed_out=False, seconds=seconds, output=str(exc), launch_error=exc
             )
-        job = _windows_job(process) if os.name == "nt" else None
         try:
             output, _err = process.communicate(timeout=timeout)
             code = process.returncode if process.returncode is not None else 1
             timed_out = False
         except subprocess.TimeoutExpired:
-            if os.name == "posix":
-                os.killpg(process.pid, signal.SIGKILL)
-            else:
-                _windows_kill(process.pid, job)
+            os.killpg(process.pid, signal.SIGKILL)
             output, _err = process.communicate()
             code = 124
             timed_out = True
-        finally:
-            if job:
-                _kernel32.CloseHandle(job)
         seconds = time.monotonic() - started
         return CommandResult(code=code, timed_out=timed_out, seconds=seconds, output=output or "")
 
@@ -322,10 +215,9 @@ def _project_interpreter(directory: Path) -> str:
     """
 
     for name in (".venv", "venv"):
-        for layout in (("bin", "python"), ("Scripts", "python.exe")):
-            candidate = (directory / name).joinpath(*layout).absolute()
-            if candidate.is_file() and os.access(candidate, os.X_OK):
-                return str(candidate)
+        candidate = (directory / name / "bin" / "python").absolute()
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
     return sys.executable
 
 
@@ -415,7 +307,7 @@ def _lua_plan(root: Path, source: Path, busted_task: str | None = None) -> tuple
     lua = runners.lua_interpreter() or "lua5.4"
     # Preserve module paths supplied by a LuaRocks interpreter wrapper, then
     # run Busted in-process: its --lua re-exec loses quoting for spaced paths.
-    loader = runners._lua_package_setup(lua) + _lua_worker_setup() + "pcall(require, 'luarocks.loader'); "
+    loader = _lua_worker_setup() + "pcall(require, 'luarocks.loader'); "
     command = [
         lua, "-e",
         loader + "require('busted.runner')({standalone = false}); os.exit(0)",

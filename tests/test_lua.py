@@ -1,4 +1,3 @@
-import os
 import shutil
 from pathlib import Path
 
@@ -22,10 +21,7 @@ def _sites(tmp_path: Path, relative: str, source: str):
     return sites_in_file(source, path, tmp_path, relative)
 
 
-@pytest.mark.parametrize("wrapper_setup", [False, True])
-def test_lua_plan_rebases_wrapper_paths_before_loading_worker_sources(tmp_path, monkeypatch, runners, wrapper_setup):
-    import json
-
+def test_lua_plan_rebases_paths_before_loading_worker_sources(tmp_path, monkeypatch, runners):
     lua = runners.lua_interpreter()
     if lua is None:
         pytest.skip("Lua 5.4 unavailable")
@@ -42,16 +38,10 @@ def test_lua_plan_rebases_wrapper_paths_before_loading_worker_sources(tmp_path, 
         "return function() assert(require('src.value') == 'worker', 'loaded original source'); "
         "print('worker source loaded') end\n", encoding="utf-8")
     paths = root.as_posix() + "/?.lua;" + cache.as_posix() + "/?.lua;" + root.as_posix() + "/"
-    if wrapper_setup:
-        # Reproduce fixed -e paths emitted after probing a LuaRocks wrapper.
-        monkeypatch.setattr(runners, "_lua_package_setup", lambda _: (
-            "package.path = " + json.dumps(paths) + "; package.cpath = ''; "))
-    else:
-        for name in ("LUA_PATH", "LUA_PATH_5_4"):
-            monkeypatch.setenv(name, paths)
-        for name in ("LUA_CPATH", "LUA_CPATH_5_4"):
-            monkeypatch.setenv(name, "")
-        monkeypatch.setattr(runners, "_lua_package_setup", lambda _: "")
+    for name in ("LUA_PATH", "LUA_PATH_5_4"):
+        monkeypatch.setenv(name, paths)
+    for name in ("LUA_CPATH", "LUA_CPATH_5_4"):
+        monkeypatch.setenv(name, "")
     command, _ = command_for(root, source, "lua", None)
     result = CommandRunner().run(command, worker, 5)
     assert result.code == 0, result.output
@@ -114,7 +104,6 @@ def test_lua_local_functions_are_private():
 
 def test_lua_tests_run_busted_in_the_nearest_busted_or_rockspec_directory(tmp_path, monkeypatch, runners):
     monkeypatch.setattr(runners, "lua_interpreter", lambda: "/opt/lua 5.4/lua")
-    monkeypatch.setattr(runners, "_lua_package_setup", lambda lua: "")
     root = tmp_path.resolve()
     (root / "pkg" / "src").mkdir(parents=True)
     (root / "pkg" / "demo-1.0-1.rockspec").write_text("", encoding="utf-8")
@@ -130,21 +119,8 @@ def test_lua_tests_run_busted_in_the_nearest_busted_or_rockspec_directory(tmp_pa
     assert command_for(root, loose, "lua", None)[1] == root
 
 
-def test_lua_plan_embeds_a_windows_interpreter_path_as_one_argument(tmp_path, monkeypatch, runners):
-    monkeypatch.setattr(runners, "lua_interpreter", lambda: "C:\\Program Files\\Lua 5.4\\lua.exe")
-    monkeypatch.setattr(runners, "_lua_package_setup", lambda lua: "package.path = 'wrapper'; ")
-    source = tmp_path / "a.lua"
-    source.write_text("", encoding="utf-8")
-    command, _directory = command_for(tmp_path, source, "lua", None)
-    assert command[:2] == ["C:\\Program Files\\Lua 5.4\\lua.exe", "-e"]
-    assert command[2].startswith("package.path = 'wrapper'; ")
-    assert command[2].endswith("require('busted.runner')({standalone = false}); os.exit(0)")
-    assert command[3:] == ["--", "busted", "--ignore-lua"]
-
-
 def test_lua_falls_back_to_lua54_when_no_interpreter_is_found(tmp_path, monkeypatch, runners):
     monkeypatch.setattr(runners, "lua_interpreter", lambda: None)
-    monkeypatch.setattr(runners, "_lua_package_setup", lambda lua: "")
     source = tmp_path / "a.lua"
     source.write_text("", encoding="utf-8")
     assert command_for(tmp_path, source, "lua", None)[0][0] == "lua5.4"
@@ -164,27 +140,17 @@ FIXTURE = Path(__file__).parent / "fixtures" / "lua_project"
 
 
 def _real_lua_interpreter() -> str | None:
-    found = ensure_crapper().runners.lua_interpreter()
-    if found is None:
-        return None
-    if os.name == "nt" and Path(found).suffix.lower() != ".exe":
-        return None
-    return found
+    return ensure_crapper().runners.lua_interpreter()
 
 
 def _busted_script() -> tuple[Path, Path] | None:
     """The busted runner script and its rock tree, when busted is installed.
 
-    luarocks exposes busted on PATH only as a wrapper (a .bat on Windows),
-    which the argv form cannot launch; the script inside the rock tree is
-    the real entry point on every platform.
+    luarocks exposes busted on PATH as a wrapper script, which the argv form
+    cannot launch; the script inside the rock tree is the real entry point.
     """
 
-    roots = []
-    appdata = os.environ.get("APPDATA")
-    if appdata:
-        roots.append(Path(appdata) / "luarocks")
-    roots += [Path.home() / ".luarocks", Path("/usr/local"), Path("/usr")]
+    roots = [Path.home() / ".luarocks", Path("/usr/local"), Path("/usr")]
     for root in roots:
         for script in sorted(root.glob("lib/luarocks/rocks-5.4/busted/*/bin/busted")):
             return script, root
@@ -206,16 +172,9 @@ def test_busted_runs_with_a_spaced_interpreter_path(tmp_path, monkeypatch, runne
     interpreter = Path(_real_lua_interpreter())
     spaced = tmp_path / "lua tools" / "with space"
     spaced.mkdir(parents=True)
-    if os.name == "nt":
-        for artifact in interpreter.parent.iterdir():
-            if artifact.suffix.lower() in (".exe", ".dll", ".so"):
-                shutil.copy(artifact, spaced / artifact.name)
-    else:
-        shutil.copy(interpreter, spaced / interpreter.name)
+    shutil.copy(interpreter, spaced / interpreter.name)
     lua = spaced / interpreter.name
     assert " " in str(lua)
-    if os.name == "nt":
-        assert "\\" in str(lua)
 
     project = tmp_path / "project"
     (project / "src").mkdir(parents=True)
@@ -243,8 +202,7 @@ def test_busted_runs_with_a_spaced_interpreter_path(tmp_path, monkeypatch, runne
     monkeypatch.setenv(
         "LUA_PATH", f"{tree}/share/lua/5.4/?.lua;{tree}/share/lua/5.4/?/init.lua;;"
     )
-    library = "?.dll" if os.name == "nt" else "?.so"
-    monkeypatch.setenv("LUA_CPATH", f"{tree}/lib/lua/5.4/{library};;")
+    monkeypatch.setenv("LUA_CPATH", f"{tree}/lib/lua/5.4/?.so;;")
     result = CommandRunner().run(command, directory, 60)
     assert result.code == 0, result.output
     assert "1 success" in result.output

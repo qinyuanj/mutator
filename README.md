@@ -37,11 +37,7 @@ Mutants of one file run at the same time. The default is one worker per core. `-
 
 Each worker is a directory under `target/mutation-workers`. Lua schedules
 previous survivors first to reduce a long final tail; history changes execution
-order only. The file being mutated is a private copy. A module that reaches that file through a relative import is copied too, so Node resolves the import to the private copy. On hosts with symlink privileges, the rest of the tree is linked. The original source stays unchanged. Workers are removed after success, setup failure, or runtime failure.
-
-When Windows reports missing symlink privilege (error 1314), mutator removes the partial overlay and rebuilds that worker as an isolated copy. Other filesystem errors remain visible. Copies exclude `.uml-viewer`, `.toolcache`, and the same version-control, virtualenv, build, worker, and cache directories excluded from overlays, at every depth. The worker destination is excluded even when it sits outside `target`. Copying can cost more disk space and startup time; `--max-workers` limits that cost.
-
-Copied workers omit existing symlinks, Windows junctions, and other reparse points, including internal aliases, broken links, and external targets. They never traverse these entries: this prevents cycles and writes through to the original tree. Projects that depend on linked source or dependencies must supply ordinary files/directories for copied workers. Ordinary dependencies such as `node_modules` are copied. Cleanup unlinks worker symlinks and junctions without visiting their targets, including links created by test commands.
+order only. The file being mutated is a private copy. A module that reaches that file through a relative import is copied too, so Node resolves the import to the private copy. The rest of the tree is linked. The original source stays unchanged. Workers are removed after success, setup failure, or runtime failure.
 
 The baseline still runs once, in the real tree, before any worker starts. The mutant command then runs inside the worker, in the same directory it would have used in the real tree, so a relative path such as `src` or `./pkg` refers to the overlay. A copy left under `target/mutator-backup/` by an interrupted older run is restored before a non-scan run.
 
@@ -207,36 +203,14 @@ Concurrent worker phase totals sum thread time and can exceed elapsed wall time.
 An unchanged selection containing only previously killed mutants skips coverage and keeps
 the existing snapshots. Survivors continue to run on each invocation.
 
-Coverage collection, measurements, and the shared-state limitation are recorded in
-[the Lua performance report](docs/lua-performance.md).
-
 For other languages, coverage is generated with crapper's commands unless
 `--use-existing-coverage` or `--no-coverage` is set. A file missing from the report
 is treated as uncovered, and the run says so.
 
-## Windows
+## WSL2
 
-Native Windows runs work without Developer Mode or administrator symlink
-rights: workers fall back to isolated copies on missing privilege. Install
-Python and each project's native test tools. For Lua, use a native Lua 5.4
-executable with Busted, LuaCov, cluacov 1.0.0, and luacov-reporter-lcov in its LuaRocks tree.
-LuaCov switches to cluacov's C hook and active-line analysis whenever it loads,
-which changes which lines count, so a missing or other cluacov version stops
-Lua coverage before any test runs.
-Make Lua available on PATH and expose that tree through LUA_PATH and LUA_CPATH
-(or a LuaRocks interpreter wrapper whose module paths crapper can recover).
-From PowerShell, install and invoke mutator with the worktree's Python:
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e '.[dev]'
-.\.venv\Scripts\python.exe -m mutator --help
-```
-
-Built-in commands preserve argument vectors; custom `--test-command` strings
-use the native shell. The runner returns the test process's status, while the
-mutation CLI returns its aggregate statuses (`0`, `2`, or `3`) described above.
-WSL2 with Ubuntu is also supported:
+Native Windows is not supported: mutator exits with status 1 and points at
+this section. Run it inside WSL2 with Ubuntu.
 
 1. In an administrator PowerShell, run `wsl --install` and reboot.
 2. Open Ubuntu and clone into the Linux home directory, not `/mnt/c`.
@@ -252,16 +226,12 @@ WSL2 with Ubuntu is also supported:
    busted, luacov, cluacov 1.0.0, and luacov-reporter-lcov, then creates `.venv`.
 4. Edit in VS Code with the WSL extension (`code .` from Ubuntu).
 
-mutator warns when a WSL project is under `/mnt/`; native Windows runs do not
-emit an unsupported-platform warning.
+mutator warns when a WSL project is under `/mnt/`.
 
-Native Windows process cleanup differs from POSIX in two ways. A timed-out
-test command is killed through a kill-on-close Job Object, so descendants
-still alive when the runner exits are killed even after a successful run —
-POSIX leaves them alone. And if a timed-out shell has already exited,
-descendants that broke away from the Job (the venv `python.exe` redirector
-re-executes the real interpreter outside it) escape both `taskkill`'s tree
-walk and the Job, so they can outlive the timeout.
+Custom `--test-command` strings run through `/bin/sh`. The runner returns the
+test process's status, while the mutation CLI returns its aggregate statuses
+(`0`, `2`, or `3`) described above. A timed-out test command is killed by
+process group, which cleans up its descendants.
 
 ## macOS
 

@@ -1,4 +1,3 @@
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -77,35 +76,6 @@ def test_python_command_uses_an_absolute_project_interpreter(tmp_path):
     ]
 
 
-def test_python_command_uses_a_windows_layout_project_interpreter(tmp_path):
-    project = tmp_path / "proj"
-    dot = project / ".venv" / "Scripts" / "python.exe"
-    _executable(dot)
-    (project / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
-    assert _python_command(project) == [str(dot.absolute()), "-m", "pytest"]
-
-    other = tmp_path / "other"
-    plain = other / "venv" / "Scripts" / "python.exe"
-    _executable(plain)
-    assert _python_command(other) == [str(plain.absolute()), "-m", "unittest", "discover"]
-
-    _executable(other / ".venv" / "Scripts" / "python.exe")
-    assert _python_command(other) == [
-        str((other / ".venv" / "Scripts" / "python.exe").absolute()),
-        "-m",
-        "unittest",
-        "discover",
-    ]
-
-
-def test_python_command_prefers_the_posix_layout_over_windows(tmp_path):
-    project = tmp_path / "proj"
-    posix = project / ".venv" / "bin" / "python"
-    _executable(posix)
-    _executable(project / ".venv" / "Scripts" / "python.exe")
-    assert _python_command(project) == [str(posix.absolute()), "-m", "unittest", "discover"]
-
-
 def test_python_command_keeps_the_virtualenv_symlink(tmp_path):
     project = tmp_path / "proj"
     target = project / "real-python"
@@ -117,10 +87,6 @@ def test_python_command_keeps_the_virtualenv_symlink(tmp_path):
     assert _python_command(project) == [str(link.absolute()), "-m", "pytest"]
 
 
-@pytest.mark.skipif(
-    os.name == "nt",
-    reason="fixture uses POSIX executable permission bits and bin/python layout",
-)
 def test_python_command_falls_back_when_the_virtualenv_cannot_run(tmp_path):
     project = tmp_path / "proj"
     binary = project / ".venv" / "bin" / "python"
@@ -180,8 +146,7 @@ def test_a_baseline_run_uses_a_dependency_installed_only_in_the_project_venv(tmp
     )
     if created.returncode != 0:
         pytest.skip(f"python -m venv failed: {created.stderr.strip()}")
-    layout = ("Scripts", "python.exe") if os.name == "nt" else ("bin", "python")
-    interpreter = (project / ".venv").joinpath(*layout)
+    interpreter = project / ".venv" / "bin" / "python"
     located = subprocess.run(
         [str(interpreter), "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
         capture_output=True,

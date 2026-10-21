@@ -11,7 +11,6 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-import shutil
 import stat
 import sys
 import uuid
@@ -94,41 +93,26 @@ def new_run_dir(root: Path) -> Path:
     return directory
 
 
-class _MissingSymlinkPrivilege(OSError):
-    pass
-
-
 def symlink(link: Path, target: Path) -> None:
     link.parent.mkdir(parents=True, exist_ok=True)
     if link.is_symlink() or link.exists():
         link.unlink()
-    try:
-        link.symlink_to(target.resolve(), target_is_directory=target.is_dir())
-    except OSError as error:
-        if getattr(error, "winerror", None) != 1314:
-            raise
-        raise _MissingSymlinkPrivilege(str(error)) from error
+    link.symlink_to(target.resolve(), target_is_directory=target.is_dir())
 
 
 def _is_link(path: Path) -> bool:
-    info = path.lstat()
-    return stat.S_ISLNK(info.st_mode) or bool(
-        getattr(info, "st_file_attributes", 0) & 0x400  # FILE_ATTRIBUTE_REPARSE_POINT
-    )
+    return stat.S_ISLNK(path.lstat().st_mode)
 
 
 def delete_tree(path: Path) -> None:
-    """Remove worker data, unlinking reparse points without visiting their targets."""
+    """Remove worker data, unlinking links without visiting their targets."""
 
     try:
         linked = _is_link(path)
     except FileNotFoundError:
         return
     if linked:
-        if path.is_symlink() or not path.is_dir():
-            path.unlink()
-        else:
-            path.rmdir()  # Windows directory junction
+        path.unlink()
         return
     if path.is_dir():
         for child in list(path.iterdir()):
@@ -300,22 +284,6 @@ def _overlay(worker: Path, root: Path, relative: str, original: bytes) -> None:
     destination.write_bytes(original)
 
 
-def _copy_tree(source: Path, destination: Path, excluded: Path) -> None:
-    """Copy ordinary entries only; never traverse a source link or reparse point."""
-
-    destination.mkdir(parents=True, exist_ok=True)
-    for child in source.iterdir():
-        if child.name in SKIP_LINK or child.absolute() == excluded.absolute():
-            continue
-        if _is_link(child):
-            continue
-        target = destination / child.name
-        if child.is_dir():
-            _copy_tree(child, target, excluded)
-        else:
-            shutil.copyfile(child, target)
-
-
 def create_workers(
     base: Path, root: Path, relative: str, original: bytes, count: int,
     *, start: int = 0,
@@ -327,19 +295,11 @@ def create_workers(
         for index in range(start, start + count):
             worker = base / f"worker-{index}"
             worker.mkdir(parents=True, exist_ok=True)
-            try:
-                _copy_configs(worker, root, relative)
-                _link_children(worker, root, {first})
-                _overlay(worker, root, relative, original)
-                for importer in importers:
-                    _copy_importer(worker, root, importer)
-            except _MissingSymlinkPrivilege:
-                # Discard every partial link before writing any copied files.
-                delete_tree(worker)
-                _copy_tree(root, worker, base)
-                destination = worker / relative
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.write_bytes(original)
+            _copy_configs(worker, root, relative)
+            _link_children(worker, root, {first})
+            _overlay(worker, root, relative, original)
+            for importer in importers:
+                _copy_importer(worker, root, importer)
             created.append(worker)
     except BaseException:
         delete_tree(base)

@@ -8,11 +8,7 @@ on:
 
 jobs:
   pytest:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, ubuntu-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
@@ -25,38 +21,25 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
-      - uses: ilammy/msvc-dev-cmd@v1
-        if: runner.os == 'Windows'
       - name: Install Ubuntu Lua build prerequisites
-        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y build-essential libreadline-dev
       - name: Build native Lua 5.4 and LuaRocks
-        shell: pwsh
         run: |
           python -m pip install hererocks==0.25.1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if ($IsWindows) { $env:PATH = ".;$env:PATH" }
           hererocks "$HOME/.luarocks" --lua 5.4
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $env:PATH = "$HOME/.luarocks/bin" + [IO.Path]::PathSeparator + $env:PATH
+          export PATH="$HOME/.luarocks/bin:$PATH"
           hererocks "$HOME/.luarocks" --luarocks 3.8.0
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          "$HOME/.luarocks/bin" >> $env:GITHUB_PATH
-          "LUA_PATH=$HOME/.luarocks/share/lua/5.4/?.lua;$HOME/.luarocks/share/lua/5.4/?/init.lua;;" >> $env:GITHUB_ENV
-          $library = if ($IsWindows) { '?.dll' } else { '?.so' }
-          "LUA_CPATH=$HOME/.luarocks/lib/lua/5.4/$library;;" >> $env:GITHUB_ENV
+          echo "$HOME/.luarocks/bin" >> "$GITHUB_PATH"
+          echo "LUA_PATH=$HOME/.luarocks/share/lua/5.4/?.lua;$HOME/.luarocks/share/lua/5.4/?/init.lua;;" >> "$GITHUB_ENV"
+          echo "LUA_CPATH=$HOME/.luarocks/lib/lua/5.4/?.so;;" >> "$GITHUB_ENV"
       - name: Install Busted and Lua coverage tools
-        shell: pwsh
         run: |
-          foreach ($rock in @('busted', 'luacov', 'luacov-reporter-lcov')) {
-            luarocks --tree="$HOME/.luarocks" install $rock
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
-          $env:LUA_PATH = "$HOME/.luarocks/share/lua/5.4/?.lua;$HOME/.luarocks/share/lua/5.4/?/init.lua;;"
-          $library = if ($IsWindows) { '?.dll' } else { '?.so' }
-          $env:LUA_CPATH = "$HOME/.luarocks/lib/lua/5.4/$library;;"
+          for rock in busted luacov luacov-reporter-lcov; do
+            luarocks --tree="$HOME/.luarocks" install "$rock"
+          done
+          export LUA_PATH="$HOME/.luarocks/share/lua/5.4/?.lua;$HOME/.luarocks/share/lua/5.4/?/init.lua;;"
+          export LUA_CPATH="$HOME/.luarocks/lib/lua/5.4/?.so;;"
           lua -e "require('busted.runner'); require('luacov'); require('luacov.reporter.lcov')"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"

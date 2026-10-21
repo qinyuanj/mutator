@@ -80,12 +80,8 @@ def test_real_lua_multifile_reuse_preserves_loader_binding(tmp_path):
     assert all(source.read_bytes() == b"return 1\n" for source in sources)
 
 
-@pytest.mark.parametrize("copy", [False, True])
-def test_multifile_parity_and_checks_amortized(tmp_path, monkeypatch, copy):
+def test_multifile_parity_and_checks_amortized(tmp_path, monkeypatch):
     sources = fixture(tmp_path)
-    if copy:
-        from test_worker_fallback import deny_links
-        deny_links(monkeypatch)
     monkeypatch.setattr("os.cpu_count", lambda: 2)
     reference = Runner()
     expected = [run(tmp_path, source, reference) for source in sources]

@@ -3,8 +3,6 @@
 from datetime import datetime
 from pathlib import Path
 
-from test_worker_fallback import deny_links
-
 from mutator.edn import loads
 from mutator.cli import parse_args, run
 from mutator.runner import CommandRunner
@@ -54,34 +52,17 @@ def test_fast_task_leaves_survivors_and_publishes_selected_results(tmp_path):
     assert ":killed 2 :survived 0" in snapshot.read_text(encoding="utf-8")
 
 
-def test_fast_task_publishes_survivors_without_touching_sources_when_links_are_denied(
-    tmp_path, monkeypatch
-):
+def test_fast_task_publishes_survivors_without_touching_sources(tmp_path, monkeypatch):
     project = task_project(tmp_path)
     originals = {
         path: path.read_bytes() for path in project.rglob("*") if path.is_file()
     }
-    deny_links(monkeypatch, after=0)
-    denied_link = Path.symlink_to
-    denied_workers = set()
-
-    def record_denial(path, target, target_is_directory=False):
-        try:
-            return denied_link(path, target, target_is_directory=target_is_directory)
-        except OSError as error:
-            assert error.winerror == 1314
-            denied_workers.add(path.parent)
-            raise
-
-    monkeypatch.setattr(Path, "symlink_to", record_denial)
     monkeypatch.setattr("os.cpu_count", lambda: 2)
     assert run([
         "--root", str(project), "--no-coverage", "--mutate-all",
         "--max-workers", "2", "--busted-task", "fast",
     ]) == 3
 
-    # Each worker must actually encounter privilege denial, even on hosts with rights.
-    assert len(denied_workers) == 2
     snapshot = project / ".metrics" / "mutate" / "calc.edn"
     published = loads(snapshot.read_text(encoding="utf-8"))
     assert datetime.fromisoformat(published.pop("tested-at")).tzinfo is not None
@@ -118,14 +99,12 @@ def test_busted_task_is_a_single_argv_entry_in_the_generated_command(tmp_path, m
 
     crapper = link.ensure_crapper()
     monkeypatch.setattr(crapper.runners, "lua_interpreter", lambda: "/opt/lua 5.4/lua")
-    monkeypatch.setattr(crapper.runners, "_lua_package_setup", lambda lua: "package.path = 'wrapped'; ")
     source = tmp_path / "a.lua"
     source.write_text("", encoding="utf-8")
     command, directory = command_for(
         tmp_path, source, "lua", None, busted_task="task with spaces"
     )
     assert command[:2] == ["/opt/lua 5.4/lua", "-e"]
-    assert command[2].startswith("package.path = 'wrapped'; ")
     assert command[2].endswith("require('busted.runner')({standalone = false}); os.exit(0)")
     assert command[3:] == ["--", "busted", "--ignore-lua", "--run", "task with spaces"]
     assert directory == tmp_path.resolve()
