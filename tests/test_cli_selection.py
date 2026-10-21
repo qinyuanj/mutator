@@ -73,7 +73,7 @@ def test_spec_coverage_requires_explicit_selection(tmp_path, monkeypatch):
     source = tmp_path / "calc.lua"
     source.write_text("return {}\n", encoding="utf-8")
     runners = ensure_crapper().runners
-    monkeypatch.setattr(runners, "lua_roots", lambda root, files: [tmp_path] if files else [])
+    monkeypatch.setattr(runners, "lua_modules", lambda root, files: {tmp_path: files} if files else {})
     marker = object()
     calls = []
     monkeypatch.setattr(lua_coverage, "collect", lambda *args, **kwargs: calls.append(kwargs) or marker)

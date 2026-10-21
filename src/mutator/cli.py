@@ -415,9 +415,7 @@ def _prepare_coverage(options: Options, root: Path, files: list[Path]) -> dict:
         from mutator.lua_coverage import collect
 
         lua_files = [path for path in files if path.suffix == ".lua"]
-        for directory in crapper.runners.lua_roots(root, lua_files):
-            targets = [path for path in lua_files
-                       if crapper.runners.lua_roots(root, [path])[0] == directory]
+        for directory, targets in crapper.runners.lua_modules(root, lua_files).items():
             indexes[directory] = collect(
                 root, targets[0], busted_task=options.busted_task,
                 reuse=options.use_existing_coverage, verbose=options.verbose, source_files=targets,
@@ -508,7 +506,7 @@ def _mutate_files(options: Options, root: Path, files: list[Path], indexes: dict
         for path in files:
             index = None
             if indexes and path.suffix == ".lua":
-                directory = ensure_crapper().runners.lua_roots(root, [path])[0]
+                directory = next(iter(ensure_crapper().runners.lua_modules(root, [path])))
                 index = indexes.get(directory)
             result = mutate_file(
                 path,

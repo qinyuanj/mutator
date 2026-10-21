@@ -303,7 +303,7 @@ def _lua_plan(root: Path, source: Path, busted_task: str | None = None) -> tuple
     """busted in the nearest `.busted` or rockspec directory, on Lua 5.4."""
 
     runners = ensure_crapper().runners
-    directory = runners.lua_roots(root, [source])[0]
+    directory = next(iter(runners.lua_modules(root, [source])))
     lua = runners.lua_interpreter() or "lua5.4"
     # Preserve module paths supplied by a LuaRocks interpreter wrapper, then
     # run Busted in-process: its --lua re-exec loses quoting for spaced paths.
