@@ -56,18 +56,19 @@ def test_removed_surviving_function_is_removed_from_snapshot(tmp_path):
     assert set(snapshot["outcomes"].values()) == {"killed"}
 
 
-def test_custom_commands_and_full_suite_keep_standard_coverage_path(tmp_path, monkeypatch):
+def test_custom_commands_keep_standard_coverage_path(tmp_path, monkeypatch):
     source = tmp_path / "calc.lua"
     source.write_text("return {}\n", encoding="utf-8")
     calls = []
     monkeypatch.setattr(ensure_crapper().runners, "run_coverage", lambda *args: calls.append(args))
-    for flags in ([], ["--full-suite"], ["--select-specs", "--test-command", "custom tests"],
+    for flags in (["--test-command", "custom tests"], ["--coverage-command", "custom coverage"],
+                  ["--select-specs", "--test-command", "custom tests"],
                   ["--select-specs", "--coverage-command", "custom coverage"]):
         assert _prepare_coverage(parse_args(flags), tmp_path, [source]) == {}
     assert len(calls) == 4
 
 
-def test_spec_coverage_requires_explicit_selection(tmp_path, monkeypatch):
+def test_standard_lua_uses_the_combined_collector(tmp_path, monkeypatch):
     from mutator import lua_coverage
 
     source = tmp_path / "calc.lua"
@@ -78,9 +79,10 @@ def test_spec_coverage_requires_explicit_selection(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(lua_coverage, "collect", lambda *args, **kwargs: calls.append(kwargs) or marker)
     monkeypatch.setattr(runners, "run_coverage", lambda *args: (_ for _ in ()).throw(
-        AssertionError("selected Lua uses its combined collector")))
+        AssertionError("standard Lua uses its combined collector")))
     other = tmp_path / "unused.lua"
     other.write_text("return {}\n", encoding="utf-8")
-    assert _prepare_coverage(parse_args(["--select-specs"]), tmp_path, [source, other]) == {tmp_path: marker}
-    assert len(calls) == 1
+    for flags in ([], ["--full-suite"], ["--select-specs"]):
+        assert _prepare_coverage(parse_args(flags), tmp_path, [source, other]) == {tmp_path: marker}
+    assert len(calls) == 3
     assert calls[0]["source_files"] == [source, other]

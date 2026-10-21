@@ -393,6 +393,7 @@ def _drain(
     checked_command: Command,
     first_site: Site | None = None,
     validate=None,
+    shared_checks: set | None = None,
 ) -> None:
     checked = {tuple(checked_command) if isinstance(checked_command, list) else checked_command}
     while True:
@@ -407,11 +408,25 @@ def _drain(
             selected_command, selected_timeout = plans.get(site.mutation_id, (command, timeout))
             key = tuple(selected_command) if isinstance(selected_command, list) else selected_command
             if key not in checked:
-                if validate is not None:
-                    validate(directory)
-                _check_worker(directory, root, cwd, runner, selected_command, selected_timeout)
-                if validate is not None:
-                    validate(directory)
+                if shared_checks is None:
+                    if validate is not None:
+                        validate(directory)
+                    _check_worker(directory, root, cwd, runner, selected_command, selected_timeout)
+                    if validate is not None:
+                        validate(directory)
+                else:
+                    # One pristine run per command across the run; the other
+                    # workers' structural state is compared by validate().
+                    with lock:
+                        first = key not in shared_checks
+                        if first:
+                            shared_checks.add(key)
+                    if first:
+                        if validate is not None:
+                            validate(directory)
+                        _check_worker(directory, root, cwd, runner, selected_command, selected_timeout)
+                        if validate is not None:
+                            validate(directory)
                 checked.add(key)
         if runner.verbose:
             with lock:
@@ -454,6 +469,7 @@ def _run_all(
     checked_command: Command,
     reserved: list[Site] | None = None,
     validate=None,
+    shared_checks: set | None = None,
 ) -> None:
     pending: Queue = Queue()
     for site in sites[len(reserved or []):]:
@@ -480,6 +496,7 @@ def _run_all(
                 if reserved is not None and plans is not None else checked_command,
                 reserved[index] if reserved is not None else None,
                 validate,
+                shared_checks,
             )
             for index, directory in enumerate(directories)
         ]
@@ -542,12 +559,15 @@ class WorkerPool:
     Commands are still checked separately on every worker and working directory.
     """
 
-    def __init__(self, root: Path, sources: list[Path]):
+    def __init__(self, root: Path, sources: list[Path], check_each_worker: bool = True):
         self.root = root.resolve()
         self.sources = {
             path.resolve().relative_to(self.root).as_posix(): path.read_bytes()
             for path in sources
         }
+        # False: one pristine command run per run, not per worker. The other
+        # workers' overlays are still compared structurally by validate().
+        self.check_each_worker = check_each_worker
         self.base = None
         self.directories = []
         self.states = {}
@@ -665,14 +685,23 @@ def run_mutants(
              timeout if check_timeout is None else check_timeout)
             for _directory in directories
         ]
-        # Validate every pristine overlay before any mutation can earn a kill.
+        # Validate pristine overlays before any mutation can earn a kill. With
+        # a shared worker pool, one run per distinct command is enough: the
+        # pool compares every other worker's structure before and after use.
         with ThreadPoolExecutor(max_workers=len(directories)) as executor:
-            checks = [
-                executor.submit(
-                    _check_worker if pool is None else pool.check,
-                    directory, root, cwd, runner, *first_plan)
-                for directory, first_plan in zip(directories, first_plans)
-            ]
+            checks = []
+            seen = set()
+            for directory, first_plan in zip(directories, first_plans):
+                if pool is not None and not pool.check_each_worker:
+                    key = first_plan[0] if isinstance(first_plan[0], str) else tuple(first_plan[0])
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                checks.append(
+                    executor.submit(
+                        _check_worker if pool is None else pool.check,
+                        directory, root, cwd, runner, *first_plan)
+                )
             for check in checks:
                 check.result()
         if pool is not None:
@@ -694,6 +723,8 @@ def run_mutants(
             command if check_command is None else check_command,
             reserved,
             pool.validate_directory if pool is not None else None,
+            shared_checks=set()
+            if pool is not None and not pool.check_each_worker else None,
         )
         if confirmation is not None:
             full_command, full_timeout = confirmation
