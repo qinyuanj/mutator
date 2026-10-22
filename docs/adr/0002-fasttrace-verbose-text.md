@@ -16,5 +16,5 @@ the global name (`in function 'mod.name'`) where fasttrace prints the
 namewhat form (`in local 'register'`). On monopoly's 7229 registrations this
 class occurred once; an exact mode exists for reconciliation tests. The patch
 engages only on Lua 5.4 with Busted 2.3.0 and otherwise falls back to
-`debug.traceback`; `MUTATOR_LUA_NO_FASTTRACE=1` disables it. An upstream PR
-to lunarmodules/busted is the long-term home for this fix.
+`debug.traceback`; `MUTATOR_LUA_NO_FASTTRACE=1` disables it. The patch stays vendored in mutator; it is not proposed
+upstream.

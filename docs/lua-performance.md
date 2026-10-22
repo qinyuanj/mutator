@@ -69,4 +69,3 @@ monopoly @9bc18c4 `src` 全量，跑到 452/567 文件（剩余 78 个文件全�
 
 - monopoly `test/busted_helper.lua` 的 `canonical()` 按路径缓存（-8%，
   monopoly 仓 issue）：合入后重测本表。
-- busted 上游合入 fasttrace 后，退回官方 luarocks 钉版。
