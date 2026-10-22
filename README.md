@@ -34,11 +34,11 @@ Exit `0` when every executed mutant was killed. Exit `2` when the baseline tests
 
 ## Workers
 
-Mutants of one file run at the same time. The default is one worker per core. `--max-workers` sets the cap. The run uses the smaller of that cap, the number of cores, and the number of selected sites. Files are still taken one at a time.
+Mutants of one file run at the same time. The default is one worker per core. `--max-workers` sets the cap. The run uses the smaller of that cap, the number of cores, and the number of selected sites. Files are taken one at a time, except full-suite Lua: its files share one worker queue, so a worker that finishes a mutant takes the next one from any file instead of waiting for the current file's slowest mutant. Each file's snapshot is still written as soon as its own last mutant finishes. `--test-command` and `--select-specs` keep the file-by-file order.
 
 Each worker is a directory under `target/mutation-workers`. Lua schedules
-previous survivors first to reduce a long final tail; history changes execution
-order only. The file being mutated is a private copy. A module that reaches that file through a relative import is copied too, so Node resolves the import to the private copy. The rest of the tree is linked. The original source stays unchanged. Workers are removed after success, setup failure, or runtime failure.
+previous survivors first within each file to reduce a long final tail; history
+changes execution order only. The file being mutated is a private copy. A module that reaches that file through a relative import is copied too, so Node resolves the import to the private copy. The rest of the tree is linked. The original source stays unchanged. Workers are removed after success, setup failure, or runtime failure.
 
 For Lua's shared worker pool, each distinct pristine command is checked once
 per run, not once per worker; every worker's overlay is still compared

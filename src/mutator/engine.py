@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -16,7 +17,7 @@ from mutator.metrics import load_history, source_key, write_results
 from mutator.model import FormResult, RunResult, Site
 from mutator.report import format_scan
 from mutator.runner import Command, CommandRunner, display_command, run_tests, test_plan
-from mutator.workers import WorkerBaselineError, WorkerPool, run_mutants
+from mutator.workers import QueuedFile, WorkerBaselineError, WorkerPool, run_mutants, run_queue
 from mutator.timings import measure
 
 
@@ -276,6 +277,37 @@ def _covering_first(index: LuaCoverageIndex, path: Path, selected: list[Site]) -
     return [*sorted(covering), *(spec for spec in sorted(index.specs) if spec not in covering)]
 
 
+def _baseline_plan(
+    path, root, runner, language, test_command, busted_task, baselines, timeout_factor,
+    file_key, lua_coverage=None,
+) -> tuple[Command, Path, float] | RunResult:
+    """The file's baseline command, its cwd and the mutant timeout, or the baseline failure."""
+
+    standard_lua = language == "lua" and not test_command
+    if standard_lua and lua_coverage is not None:
+        command, cwd = lua_coverage.command, lua_coverage.directory
+    else:
+        command, cwd = test_plan(root, path, language, test_command, busted_task)
+    cache_key = (_command_key(command), str(cwd))
+    if standard_lua and lua_coverage is not None and getattr(lua_coverage, "fresh", False):
+        # The fresh coverage run already proved the pristine suite passes, so
+        # the baseline does not run again. Its coverage-inflated duration
+        # becomes the timeout base (docs/adr/0001-coverage-run-as-baseline.md).
+        baselines.setdefault(cache_key, (True, lua_coverage.seconds, ""))
+    _remember_baseline(baselines, cache_key, runner, command, cwd)
+    ok, seconds, tail = baselines[cache_key]
+    if not ok:
+        return _baseline_failure(file_key, command, tail)
+    return command, cwd, max(2.0, seconds * timeout_factor)
+
+
+def _full_suite_command(command: list[str], lua_coverage, path: Path, selected: list[Site]) -> list[str]:
+    command = [*command, "--no-keep-going"]
+    if lua_coverage is None:
+        return command
+    return [*command, *_covering_first(lua_coverage, path, selected)]
+
+
 def _apply_selected(
     path,
     root,
@@ -297,31 +329,21 @@ def _apply_selected(
     if not selected:
         return None
     standard_lua = language == "lua" and not test_command
-    if standard_lua and lua_coverage is not None:
-        command, cwd = lua_coverage.command, lua_coverage.directory
-    else:
-        command, cwd = test_plan(root, path, language, test_command, busted_task)
-    cache_key = (_command_key(command), str(cwd))
-    if standard_lua and lua_coverage is not None and getattr(lua_coverage, "fresh", False):
-        # The fresh coverage run already proved the pristine suite passes, so
-        # the baseline does not run again. Its coverage-inflated duration
-        # becomes the timeout base (docs/adr/0001-coverage-run-as-baseline.md).
-        baselines.setdefault(cache_key, (True, lua_coverage.seconds, ""))
-    _remember_baseline(baselines, cache_key, runner, command, cwd)
-    ok, seconds, tail = baselines[cache_key]
-    if not ok:
-        return _baseline_failure(file_key, command, tail)
-    timeout = max(2.0, seconds * timeout_factor)
+    plan = _baseline_plan(path, root, runner, language, test_command, busted_task, baselines,
+                   timeout_factor, file_key, lua_coverage)
+    if isinstance(plan, RunResult):
+        return plan
+    command, cwd, timeout = plan
     plans = None
     check_command, check_timeout = command, timeout
     if standard_lua:
-        command = [*command, "--no-keep-going"]
         if select_specs and lua_coverage is not None:
+            command = [*command, "--no-keep-going"]
             plans, check_command, check_timeout = _lua_plans(
                 lua_coverage, path, selected, command, timeout, timeout_factor, runner, baselines
             )
-        elif lua_coverage is not None:
-            command = [*command, *_covering_first(lua_coverage, path, selected)]
+        else:
+            command = _full_suite_command(command, lua_coverage, path, selected)
     confirmation = (
         (command, timeout) if standard_lua and select_specs and lua_coverage is not None else None
     )
@@ -364,27 +386,33 @@ def _restore_if_dirty(path: Path, original: bytes) -> None:
         path.write_bytes(original)
 
 
-def mutate_file(
+@dataclass
+class _Prepared:
+    """A file whose sites are selected and whose snapshot is still unwritten."""
+
+    path: Path
+    root: Path
+    language: str
+    file_key: str
+    original: bytes
+    source: str
+    found: list[Site]
+    covered: dict[str, bool]
+    lines: set[int] | None
+    selected: list[Site]
+    outcomes: dict[str, str]
+
+
+def _prepare(
     path: Path,
     root: Path,
-    *,
-    runner: CommandRunner,
     covered_lines: set[int] | None,
     ignore_coverage: bool,
     mutate_all: bool,
     lines: set[int] | None,
     test_command: str | None,
-    timeout_factor: float,
     mutation_warning: int,
-    baselines: dict[tuple[tuple[str, ...], str], tuple[bool, float, str]],
-    max_workers: int | None = None,
-    busted_task: str | None = None,
-    lua_coverage: LuaCoverageIndex | None = None,
-    worker_pool: WorkerPool | None = None,
-    select_specs: bool = False,
-) -> RunResult:
-    """Mutate one file and write its namespaces into `.metrics/mutate`."""
-
+) -> _Prepared | RunResult:
     root = root.resolve()
     path = path.resolve()
     crapper = ensure_crapper()
@@ -406,18 +434,61 @@ def mutate_file(
         selected.sort(key=lambda site: history.outcomes.get(site.mutation_id) != "survived")
     outcomes = _carry_forward(found, covered, history, digests)
     _warn_many(file_key, selected, mutation_warning)
+    return _Prepared(path, root, language, file_key, original, source, found, covered, lines,
+                     selected, outcomes)
+
+
+def _publish(prepared: _Prepared) -> RunResult:
+    p = prepared
+    forms = _forms(p.source, p.path, p.root, p.file_key, p.found, p.covered, p.outcomes, p.lines)
+    written = write_results(p.root, p.file_key, forms, p.outcomes)
+    _restore_if_dirty(p.path, p.original)
+    return RunResult(
+        path=p.file_key,
+        forms=forms,
+        written=[item.as_posix() for item in written],
+        sites=p.found,
+        statuses=_statuses(p.found, p.covered, p.outcomes),
+    )
+
+
+def mutate_file(
+    path: Path,
+    root: Path,
+    *,
+    runner: CommandRunner,
+    covered_lines: set[int] | None,
+    ignore_coverage: bool,
+    mutate_all: bool,
+    lines: set[int] | None,
+    test_command: str | None,
+    timeout_factor: float,
+    mutation_warning: int,
+    baselines: dict[tuple[tuple[str, ...], str], tuple[bool, float, str]],
+    max_workers: int | None = None,
+    busted_task: str | None = None,
+    lua_coverage: LuaCoverageIndex | None = None,
+    worker_pool: WorkerPool | None = None,
+    select_specs: bool = False,
+) -> RunResult:
+    """Mutate one file and write its namespaces into `.metrics/mutate`."""
+
+    prepared = _prepare(path, root, covered_lines, ignore_coverage, mutate_all, lines,
+                        test_command, mutation_warning)
+    if isinstance(prepared, RunResult):
+        return prepared
     failure = _apply_selected(
-        path,
-        root,
-        original,
-        selected,
+        prepared.path,
+        prepared.root,
+        prepared.original,
+        prepared.selected,
         runner,
-        language,
+        prepared.language,
         test_command,
         timeout_factor,
-        file_key,
+        prepared.file_key,
         baselines,
-        outcomes,
+        prepared.outcomes,
         max_workers,
         busted_task,
         lua_coverage,
@@ -426,16 +497,77 @@ def mutate_file(
     )
     if failure is not None:
         return failure
-    forms = _forms(source, path, root, file_key, found, covered, outcomes, lines)
-    written = write_results(root, file_key, forms, outcomes)
-    _restore_if_dirty(path, original)
-    return RunResult(
-        path=file_key,
-        forms=forms,
-        written=[item.as_posix() for item in written],
-        sites=found,
-        statuses=_statuses(found, covered, outcomes),
-    )
+    return _publish(prepared)
+
+
+def mutate_queued(
+    files: list[tuple[Path, set[int] | None, LuaCoverageIndex | None]],
+    root: Path,
+    *,
+    runner: CommandRunner,
+    ignore_coverage: bool,
+    mutate_all: bool,
+    lines: set[int] | None,
+    timeout_factor: float,
+    mutation_warning: int,
+    baselines: dict[tuple[tuple[str, ...], str], tuple[bool, float, str]],
+    max_workers: int | None,
+    busted_task: str | None,
+    worker_pool: WorkerPool,
+) -> list[RunResult]:
+    """Mutate full-suite Lua files on one shared worker queue.
+
+    Each entry is a file, its covered lines and its spec index. Every file's
+    snapshot is written as soon as its own last mutant finishes. A baseline
+    failure stays with its file; a worker failure fails the files that had
+    not completed and keeps the snapshots of those that had. Results follow
+    the order of ``files``.
+    """
+
+    results: dict[int, RunResult] = {}
+    prepared: dict[int, _Prepared] = {}
+    jobs: dict[int, QueuedFile] = {}
+    for position, (path, covered_lines, lua_coverage) in enumerate(files):
+        item = _prepare(path, root, covered_lines, ignore_coverage, mutate_all, lines, None,
+                        mutation_warning)
+        if isinstance(item, RunResult):
+            results[position] = item
+            continue
+        if not item.selected:
+            results[position] = _publish(item)
+            continue
+        plan = _baseline_plan(item.path, item.root, runner, item.language, None, busted_task, baselines,
+                       timeout_factor, item.file_key, lua_coverage)
+        if isinstance(plan, RunResult):
+            results[position] = plan
+            continue
+        command, cwd, timeout = plan
+        prepared[position] = item
+        jobs[position] = QueuedFile(
+            relative=item.path.relative_to(item.root).as_posix(),
+            original=item.original,
+            sites=item.selected,
+            command=_full_suite_command(command, lua_coverage, item.path, item.selected),
+            cwd=cwd,
+            timeout=timeout,
+            file_key=item.file_key,
+            check_command=command,
+            check_timeout=timeout,
+        )
+    positions = {id(job): position for position, job in jobs.items()}
+
+    def publish(job: QueuedFile) -> None:
+        position = positions[id(job)]
+        prepared[position].outcomes.update(job.completed)
+        results[position] = _publish(prepared[position])
+
+    try:
+        run_queue(worker_pool, list(jobs.values()), max_workers, runner, publish)
+    except WorkerBaselineError as error:
+        for position, job in jobs.items():
+            if position not in results:
+                results[position] = _baseline_failure(job.file_key, job.command, str(error))
+    return [results[position] for position in range(len(files))]
 
 
 def needs_mutation(

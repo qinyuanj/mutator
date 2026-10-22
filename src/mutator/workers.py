@@ -15,9 +15,10 @@ import stat
 import sys
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from pathlib import Path
 from queue import Empty, Queue
-from threading import Lock
+from threading import Event, Lock
 
 from mutator.model import Site
 from mutator.runner import Command, run_tests
@@ -619,7 +620,8 @@ class WorkerPool:
             self.failed = True
             raise WorkerBaselineError(f"Worker restoration failed in {directory}")
 
-    def validate(self):
+    def validate_project(self):
+        """The real tree only. Safe while workers hold mutants of other files."""
         if _worker_state(self.root, project=True) != self.project_state:
             self.failed = True
             raise WorkerBaselineError("Project inputs changed during worker reuse")
@@ -627,9 +629,11 @@ class WorkerPool:
             if (self.root / name).read_bytes() != original:
                 self.failed = True
                 raise WorkerBaselineError(f"Original source changed during worker reuse: {name}")
+
+    def validate(self):
+        self.validate_project()
         for directory in self.directories:
             self.validate_directory(directory)
-
 
     def check(self, directory, root, cwd, runner, command, timeout):
         mapped = mapped_cwd(directory, root, cwd)
@@ -757,3 +761,124 @@ def run_mutants(
     finally:
         if base is not None:
             delete_tree(base)
+
+
+@dataclass
+class QueuedFile:
+    """One file's mutants and the command that judges them.
+
+    Commands differ per file (covering specs first), so every item carries its
+    own. Sites stay in the order the engine selected them, with each file's
+    previous survivors first.
+    """
+
+    relative: str
+    original: bytes
+    sites: list[Site]
+    command: Command
+    cwd: Path
+    timeout: float
+    file_key: str
+    check_command: Command
+    check_timeout: float
+    completed: dict[str, str] = field(default_factory=dict)
+
+
+def _check_queue(pool: WorkerPool, directories: list[Path], files: list[QueuedFile], runner) -> None:
+    """Pristine checks for every distinct command before any mutant can earn a kill."""
+
+    distinct: dict[tuple, QueuedFile] = {}
+    for item in files:
+        command = item.check_command
+        key = (command,) if isinstance(command, str) else tuple(command)
+        distinct.setdefault((key, str(item.cwd)), item)
+    planned: dict[Path, list[QueuedFile]] = {}
+    for index, item in enumerate(distinct.values()):
+        if pool.check_each_worker:
+            for directory in directories:
+                planned.setdefault(directory, []).append(item)
+        else:
+            # One run per command; the other workers are compared structurally.
+            planned.setdefault(directories[index % len(directories)], []).append(item)
+
+    def check(directory: Path) -> None:
+        for item in planned[directory]:
+            pool.check(directory, pool.root, item.cwd, runner, item.check_command, item.check_timeout)
+
+    with ThreadPoolExecutor(max_workers=len(planned)) as executor:
+        for future in [executor.submit(check, directory) for directory in planned]:
+            future.result()
+
+
+def run_queue(pool: WorkerPool, files: list[QueuedFile], max_workers: int | None, runner, on_done) -> None:
+    """Run the mutants of several files on one worker queue.
+
+    A worker that finishes a mutant takes the next one from any file, so one
+    file's slowest mutant no longer idles the rest. ``on_done(item)`` runs one
+    call at a time as soon as that file's last mutant is restored and the real
+    tree is validated; after any failure no further file completes. Each
+    worker validates its own overlay around every mutant; the pool-wide
+    validate() runs only while every worker is pristine.
+    """
+
+    files = [item for item in files if item.sites]
+    if not files:
+        return
+    try:
+        for item in files:
+            if pool.sources.get(item.relative) != item.original:
+                raise WorkerBaselineError("Worker pool source binding changed or pool failed")
+        with measure("worker-prepare"):
+            count = worker_count(sum(len(item.sites) for item in files), max_workers)
+            directories = pool.prepare(files[0].relative, files[0].original, count)
+        _check_queue(pool, directories, files, runner)
+        pool.validate()
+        pending: Queue = Queue()
+        for item in files:
+            for site in item.sites:
+                pending.put((item, site))
+        remaining = {id(item): len(item.sites) for item in files}
+        lock, publishing, stop = Lock(), Lock(), Event()
+
+        def drain(directory: Path) -> None:
+            try:
+                while not stop.is_set():
+                    try:
+                        item, site = pending.get_nowait()
+                    except Empty:
+                        return
+                    if runner.verbose:
+                        with lock:
+                            _report(item.file_key, site)
+                    status = _execute(
+                        directory, site, pool.root, item.relative, item.original, runner,
+                        item.command, item.cwd, item.timeout, item.file_key,
+                        validate=pool.validate_directory,
+                    )
+                    with lock:
+                        item.completed[site.mutation_id] = status
+                        remaining[id(item)] -= 1
+                        finished = remaining[id(item)] == 0
+                    if finished:
+                        with publishing:
+                            if stop.is_set():
+                                return
+                            pool.validate_project()
+                            on_done(item)
+            except BaseException:
+                stop.set()
+                raise
+
+        with ThreadPoolExecutor(max_workers=len(directories)) as executor:
+            futures = [executor.submit(drain, directory) for directory in directories]
+            try:
+                for future in futures:
+                    future.result()
+            except BaseException:
+                # An interrupt lands here; running mutants finish and restore.
+                stop.set()
+                raise
+        pool.validate()
+    except BaseException:
+        pool.close()
+        raise

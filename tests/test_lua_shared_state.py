@@ -9,7 +9,14 @@ import pytest
 from mutator.crapper_link import ensure_crapper
 from mutator.engine import mutate_file
 from mutator.lua_coverage import collect
-from mutator.runner import CommandRunner
+from mutator.runner import CommandRunner, _pinned_lua_paths
+
+
+def _pinned(directory):
+    """Probe with the LuaRocks paths mutator pins for its own runs."""
+
+    paths = _pinned_lua_paths(directory)
+    return [] if paths is None else ["env", f"LUA_PATH={paths[0]}", f"LUA_CPATH={paths[1]}"]
 
 
 def test_shared_cached_result_keeps_full_suite_kills(tmp_path):
@@ -19,7 +26,7 @@ def test_shared_cached_result_keeps_full_suite_kills(tmp_path):
         pytest.skip("Lua 5.4 unavailable")
     runner = CommandRunner()
     probe = runner.run(
-        [lua, "-e",
+        [*_pinned(tmp_path), lua, "-e",
          "require('busted.runner'); require('luacov.reporter.lcov'); require('dkjson')"],
         tmp_path, 15,
     )
@@ -80,7 +87,7 @@ def test_opted_in_selection_can_kill_full_suite_survivor_with_shared_state(tmp_p
         pytest.skip("Lua 5.4 unavailable")
     runner = CommandRunner()
     probe = runner.run(
-        [lua, "-e",
+        [*_pinned(tmp_path), lua, "-e",
          "require('busted.runner'); require('luacov.reporter.lcov'); require('dkjson')"],
         tmp_path, 15,
     )

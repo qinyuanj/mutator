@@ -7,7 +7,7 @@ import pytest
 
 from mutator.crapper_link import ensure_crapper
 from mutator.lua_coverage import LuaCoverageIndex, _decode, _literal, collect, load
-from mutator.runner import CommandRunner
+from mutator.runner import CommandRunner, _rocks_trees
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "lua_project"
@@ -56,12 +56,14 @@ def toolchain(monkeypatch):
         if not git_directory.is_absolute():
             git_directory = checkout / git_directory
         checkout = git_directory.resolve().parents[2]
-    tree = checkout.parent / "monopoly" / ".toolcache" / "luarocks"
-    if tree.is_dir():
-        setup = f"package.path = {json.dumps(tree.as_posix() + '/share/lua/5.4/?.lua;')} .. package.path; "
-        setup += f"package.cpath = {json.dumps(tree.as_posix() + '/lib/lua/5.4/?.so;')} .. package.cpath; "
-    else:
-        setup = ""
+    # The machine's LuaRocks trees too, the ones mutator pins for its own runs.
+    trees = [Path(tree) for tree in _rocks_trees()]
+    trees.append(checkout.parent / "monopoly" / ".toolcache" / "luarocks")
+    setup = ""
+    for tree in trees:
+        if tree.is_dir():
+            setup += f"package.path = {json.dumps(tree.as_posix() + '/share/lua/5.4/?.lua;')} .. package.path; "
+            setup += f"package.cpath = {json.dumps(tree.as_posix() + '/lib/lua/5.4/?.so;')} .. package.cpath; "
     probe = CommandRunner().run(
         [lua, "-e", setup + "require('busted.runner'); require('luacov.reporter.lcov'); "
          + "require('cluacov.hook'); print('ready')"],

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from mutator.crapper_link import ensure_crapper
 from mutator.coverage import covered_lines
-from mutator.engine import mutate_file, restore_backups, scan_file
+from mutator.engine import mutate_file, mutate_queued, restore_backups, scan_file
 from mutator.report import format_results, format_site_log
 from mutator.runner import CommandRunner
 from mutator import timings
@@ -63,8 +63,8 @@ Options:
                                 2 seconds.
   --mutation-warning <number>   Warn when a file selects more covered sites
                                 than this. Default: 50.
-  --max-workers <number>        Run at most this many mutants of one file at
-                                once. Default: one per core. The run uses the
+  --max-workers <number>        Run at most this many mutants at once.
+                                Default: one per core. The run uses the
                                 smaller of this limit, the cores, and the
                                 number of selected sites.
   --select-specs                Opt into Lua spec-file selection. Requires tests
@@ -90,8 +90,10 @@ The default, once a snapshot exists, reruns survivors and sites in functions
 whose text changed. Killed mutants in unchanged functions are kept.
 
 Selected mutants of one file run at the same time, one worker per core unless
---max-workers says otherwise. A worker is a symlink overlay under
-target/mutation-workers with its own copy of the mutated file. The project tree
+--max-workers says otherwise. Full-suite Lua files share one worker queue, so
+mutants of the next file start while the current file finishes; each file's
+snapshot is written when its own mutants are done. A worker is a symlink
+overlay under target/mutation-workers with its own copy of the mutated file. The project tree
 is left unchanged. A copy left under target/mutator-backup/ by an interrupted
 older run is restored before a non-scan run.
 
@@ -502,6 +504,19 @@ def _finish(baseline_failed: bool, survived: bool) -> int:
     return 0
 
 
+def _lua_index(root: Path, path: Path, indexes: dict | None):
+    if not indexes or path.suffix != ".lua":
+        return None
+    directory = next(iter(ensure_crapper().runners.lua_modules(root, [path])))
+    return indexes.get(directory)
+
+
+def _shares_queue(options: Options, path: Path) -> bool:
+    """Full-suite Lua files share one worker queue; the rest go file by file."""
+
+    return path.suffix == ".lua" and not options.test_command and not options.select_specs
+
+
 def _mutate_files(options: Options, root: Path, files: list[Path], indexes: dict | None = None) -> int:
     runner = CommandRunner(verbose=options.verbose)
     baselines: dict[tuple[tuple[str, ...], str], tuple[bool, float, str]] = {}
@@ -509,14 +524,30 @@ def _mutate_files(options: Options, root: Path, files: list[Path], indexes: dict
     written: list[str] = []
     baseline_failed = False
     survived = False
+    results = {}
     lua_sources = [path for path in files if path.suffix == ".lua"]
     with WorkerPool(root, lua_sources, check_each_worker=options.paranoid_workers) as worker_pool:
+        queued = [path for path in files if _shares_queue(options, path)]
+        if queued:
+            results.update(zip(queued, mutate_queued(
+                [(path, _coverage_for(options, root, path), _lua_index(root, path, indexes))
+                 for path in queued],
+                root,
+                runner=runner,
+                ignore_coverage=options.no_coverage,
+                mutate_all=options.mutate_all,
+                lines=options.lines,
+                timeout_factor=options.timeout_factor,
+                mutation_warning=options.mutation_warning,
+                baselines=baselines,
+                max_workers=options.max_workers,
+                busted_task=options.busted_task,
+                worker_pool=worker_pool,
+            )))
         for path in files:
-            index = None
-            if indexes and path.suffix == ".lua":
-                directory = next(iter(ensure_crapper().runners.lua_modules(root, [path])))
-                index = indexes.get(directory)
-            result = mutate_file(
+            if path in results:
+                continue
+            results[path] = mutate_file(
                 path,
                 root,
                 runner=runner,
@@ -530,15 +561,16 @@ def _mutate_files(options: Options, root: Path, files: list[Path], indexes: dict
                 baselines=baselines,
                 max_workers=options.max_workers,
                 busted_task=options.busted_task,
-                lua_coverage=index,
+                lua_coverage=_lua_index(root, path, indexes),
                 worker_pool=worker_pool if path.suffix == ".lua" else None,
                 select_specs=options.select_specs,
             )
-            outcome = _record(result, forms, written)
-            if outcome == "baseline":
-                baseline_failed = True
-            elif outcome == "survived":
-                survived = True
+    for path in files:
+        outcome = _record(results[path], forms, written)
+        if outcome == "baseline":
+            baseline_failed = True
+        elif outcome == "survived":
+            survived = True
     if forms:
         print(format_results(forms), end="")
     for path in written:
