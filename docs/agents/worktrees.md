@@ -10,4 +10,4 @@ The main checkout may have no `.venv`. Each agent working in a `git worktree` mu
 
 ## Reporting test results
 
-The baseline is expected to be green. If a test fails on the unmodified base commit, fix it or quarantine it in the same change — do not leave "pre-existing failure" caveats for the next agent to re-verify. CI runs the suite on Ubuntu, so a red baseline blocks every PR.
+The baseline is expected to be green. If a test fails on the unmodified base commit, fix it or quarantine it in the same change — do not leave "pre-existing failure" caveats for the next agent to re-verify.
