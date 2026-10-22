@@ -149,6 +149,13 @@ keeps. `MUTATOR_LUA_NO_CACHE=1` and `MUTATOR_LUA_NO_FASTTRACE=1` disable each
 part; verbose failure output is unchanged outside one enumerable class
 (`docs/adr/0002-fasttrace-verbose-text.md`).
 
+Without `--select-specs`, each mutant still runs every spec of the suite, but
+the specs that cover the file's mutants come first, so a killing spec fails
+early under `--no-keep-going` (`docs/adr/0003-covering-specs-first.md`). Each
+Lua test run is capped at 2 GiB of address space so a runaway mutant fails
+instead of exhausting memory; `MUTATOR_LUA_MEMORY_MB` sets the cap and `0`
+removes it.
+
 A fresh Lua coverage run doubles as the test baseline: the suite already
 passed, so it does not run again, and the mutant timeout derives from the
 coverage-inclusive duration (`docs/adr/0001-coverage-run-as-baseline.md`).

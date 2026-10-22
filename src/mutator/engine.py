@@ -262,6 +262,20 @@ def _lua_plans(
     return plans, [*command, *specs], check_timeout
 
 
+def _covering_first(index: LuaCoverageIndex, path: Path, selected: list[Site]) -> list[str]:
+    """Every spec of the suite, the ones covering this file's mutants first.
+
+    The full suite still runs, so outcomes keep their full-suite meaning; a
+    killing spec just runs early under --no-keep-going
+    (docs/adr/0003-covering-specs-first.md).
+    """
+
+    covering: set[str] = set()
+    for site in selected:
+        covering.update(index.select(path, site.line) or ())
+    return [*sorted(covering), *(spec for spec in sorted(index.specs) if spec not in covering)]
+
+
 def _apply_selected(
     path,
     root,
@@ -306,6 +320,8 @@ def _apply_selected(
             plans, check_command, check_timeout = _lua_plans(
                 lua_coverage, path, selected, command, timeout, timeout_factor, runner, baselines
             )
+        elif lua_coverage is not None:
+            command = [*command, *_covering_first(lua_coverage, path, selected)]
     confirmation = (
         (command, timeout) if standard_lua and select_specs and lua_coverage is not None else None
     )

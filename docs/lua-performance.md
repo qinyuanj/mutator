@@ -69,3 +69,13 @@ monopoly @9bc18c4 `src` 全量，跑到 452/567 文件（剩余 78 个文件全�
 
 - monopoly `test/busted_helper.lua` 的 `canonical()` 按路径缓存（-8%，
   monopoly 仓 issue）：合入后重测本表。
+
+## 覆盖 spec 先跑 + 内存上限（#17）
+
+抽样 5 个文件（`src/ui/render/board/{scene,tile}.lua`、
+`src/rules/items/{post_effects,steal}.lua`、`src/turn/phases/phase_wait.lua`），
+4 worker：墙钟 **427 秒**（含覆盖率 49 秒、worker 检查 50 秒），变异体均值
+12.1 秒；前 4 个文件原顺序下墙钟 808 秒、均值约 24 秒。`phase_wait` 原来被
+超时变异体拖到 620–760 秒，现在约 1 分钟。114 个变异体与 `/tmp/mono-full`
+全量快照逐 mutation_id 一致（66 killed / 16 survived 为本次实跑部分）。
+剩余成本以存活者为主（每个都要跑完整套件）。

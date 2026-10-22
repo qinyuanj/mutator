@@ -111,6 +111,35 @@ def _prefer_worker_lua(cwd: Path, environment: dict, command: Command) -> Comman
     return command
 
 
+_LUA_MEMORY_MB = 2048
+
+
+def _memory_limit(command: Command):
+    """Cap a generated Lua run's address space so a runaway mutant fails fast.
+
+    A mutant stuck in an allocating loop otherwise grows until its timeout and
+    can exhaust the machine. The pristine suite peaks well under the cap; a
+    mutant that hits it raises "not enough memory" and fails like any other
+    error. `MUTATOR_LUA_MEMORY_MB=0` disables the cap.
+    """
+
+    if not isinstance(command, list) or not command or os.name != "posix":
+        return None
+    if not Path(lua_executable(command)).name.startswith("lua"):
+        return None
+    megabytes = int(os.environ.get("MUTATOR_LUA_MEMORY_MB", _LUA_MEMORY_MB))
+    if megabytes <= 0:
+        return None
+    import resource
+
+    limit = megabytes * 1024 * 1024
+
+    def apply():
+        resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+
+    return apply
+
+
 def display_command(command: Command) -> str:
     """A shell-looking rendering. A list is quoted so it can be pasted."""
 
@@ -148,6 +177,7 @@ class CommandRunner:
                 start_new_session=True,
                 text=True,
                 env=environment,
+                preexec_fn=_memory_limit(command),
             )
         except OSError as exc:
             seconds = time.monotonic() - started

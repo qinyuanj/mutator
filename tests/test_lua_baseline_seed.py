@@ -18,6 +18,7 @@ class Index:
         self.command = ["lua54", "-e", "run_busted()", "--", "busted", "--ignore-lua"]
         self.fresh = fresh
         self.seconds = seconds
+        self.specs = {}
 
     def select(self, source, line):
         return None
