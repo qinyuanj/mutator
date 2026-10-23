@@ -45,6 +45,10 @@ per run, not once per worker; every worker's overlay is still compared
 structurally before and after use. `--paranoid-workers` restores a full
 pristine run in every worker.
 
+Every command run inside a worker gets `CARGO_BUILD_JOBS` set to the cores divided by the number of workers (at least 1), so the workers' Cargo builds together use about one job per core. A `CARGO_BUILD_JOBS` already in the environment is passed through unchanged.
+
+SIGTERM or SIGINT (Ctrl-C) stops the run: mutator kills the running test processes, restores and removes its overlays, writes no snapshot for a file whose mutants did not all finish, and exits with 128 plus the signal number (143 or 130). The original sources are never modified.
+
 The baseline still runs once, in the real tree, before any worker starts. The mutant command then runs inside the worker, in the same directory it would have used in the real tree, so a relative path such as `src` or `./pkg` refers to the overlay. A copy left under `target/mutator-backup/` by an interrupted older run is restored before a non-scan run.
 
 ## Snapshot

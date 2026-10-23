@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import signal
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -11,9 +13,9 @@ from mutator.crapper_link import ensure_crapper
 from mutator.coverage import covered_lines
 from mutator.engine import mutate_file, mutate_queued, restore_backups, scan_file
 from mutator.report import format_results, format_site_log
-from mutator.runner import CommandRunner
+from mutator.runner import CommandRunner, Interrupted, stop_commands
 from mutator import timings
-from mutator.workers import WorkerPool
+from mutator.workers import WorkerPool, discard_overlays
 
 HELP = """\
 Usage: mutator [options] [path-or-filter ...]
@@ -597,6 +599,38 @@ def platform_warning(platform: str, root: Path) -> str | None:
     return None
 
 
+_STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT)
+
+
+def _interrupt(signum, _frame) -> None:
+    stop_commands(signum)
+    raise Interrupted(signum)
+
+
+def _interruptible(work) -> int:
+    """Run ``work``; on SIGTERM/SIGINT kill its tests and remove its overlays.
+
+    Running mutants are restored by the worker threads as their killed
+    commands return. Files whose mutants did not all finish get no snapshot.
+    """
+
+    if threading.current_thread() is not threading.main_thread():
+        return work()
+    previous = {signum: signal.signal(signum, _interrupt) for signum in _STOP_SIGNALS}
+    try:
+        return work()
+    except Interrupted as stop:
+        for signum in _STOP_SIGNALS:
+            signal.signal(signum, signal.SIG_IGN)
+        discard_overlays()
+        print(f"Interrupted by {signal.Signals(stop.signum).name}; "
+              "unfinished files keep their previous snapshots.", file=sys.stderr)
+        return 128 + stop.signum
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+
 def run(argv: list[str] | None = None) -> int:
     options = parse_args(argv)
     if options.action == "help":
@@ -633,7 +667,7 @@ def run(argv: list[str] | None = None) -> int:
     if options.scan:
         return _scan(options, root, files)
     with timings.measure("mutation-run"):
-        code = _mutate_files(options, root, files, indexes)
+        code = _interruptible(lambda: _mutate_files(options, root, files, indexes))
     if options.timings:
         print(timings.summary(), file=sys.stderr, end="")
     return code

@@ -88,10 +88,23 @@ def worker_count(site_count: int, requested: int | None) -> int:
     return max(1, min(site_count, processors, limit))
 
 
+# Every run directory this process made, so an interrupt can remove leftovers.
+_created_runs: set[Path] = set()
+
+
 def new_run_dir(root: Path) -> Path:
     directory = root / "target" / "mutation-workers" / f"run-{uuid.uuid4()}"
     directory.mkdir(parents=True)
+    _created_runs.add(directory)
     return directory
+
+
+def discard_overlays() -> None:
+    """Remove the overlays this process created and has not removed yet."""
+
+    for directory in list(_created_runs):
+        delete_tree(directory)
+        _created_runs.discard(directory)
 
 
 def symlink(link: Path, target: Path) -> None:
@@ -681,6 +694,7 @@ def run_mutants(
                 create_workers(base, root, relative, original, count)
                 if pool is None else pool.prepare(relative, original, count)
             )
+        runner.workers = len(directories)
         reserved = sites[:len(directories)] if plans is not None else None
         first_plans = [
             plans.get(site.mutation_id, (command, timeout)) for site in reserved
@@ -831,6 +845,7 @@ def run_queue(pool: WorkerPool, files: list[QueuedFile], max_workers: int | None
         with measure("worker-prepare"):
             count = worker_count(sum(len(item.sites) for item in files), max_workers)
             directories = pool.prepare(files[0].relative, files[0].original, count)
+        runner.workers = len(directories)
         _check_queue(pool, directories, files, runner)
         pool.validate()
         pending: Queue = Queue()

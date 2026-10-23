@@ -9,6 +9,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,6 +26,45 @@ class CommandResult:
     seconds: float
     output: str
     launch_error: OSError | None = None
+
+
+class Interrupted(BaseException):
+    """SIGTERM or SIGINT reached mutator. No outcome after it can be trusted."""
+
+    def __init__(self, signum: int):
+        super().__init__(signum)
+        self.signum = signum
+
+
+# Test process groups still running, so an interrupt can kill them.
+_running: set[subprocess.Popen] = set()
+_running_lock = threading.Lock()
+_stopped: int | None = None
+
+
+def _kill_group(process: subprocess.Popen) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def stop_commands(signum: int) -> None:
+    """Kill every running command; later and unfinished ones raise Interrupted.
+
+    Called from a signal handler on the main thread, so it takes no lock the
+    main thread could already hold.
+    """
+
+    global _stopped
+    _stopped = signum
+    for process in list(_running):
+        _kill_group(process)
+
+
+def _check_stopped() -> None:
+    if _stopped is not None:
+        raise Interrupted(_stopped)
 
 
 def _worker_home(cwd: Path) -> Path | None:
@@ -148,9 +188,22 @@ def display_command(command: Command) -> str:
     return " ".join(shlex.quote(part) for part in command)
 
 
+def _share_cores(cwd: Path, environment: dict, workers: int) -> None:
+    """Split the cores between a run's workers; a user's own setting wins.
+
+    Cargo otherwise starts one job per core in every worker at once.
+    """
+
+    if "CARGO_BUILD_JOBS" in os.environ or _worker_home(cwd.resolve()) is None:
+        return
+    environment["CARGO_BUILD_JOBS"] = str(max(1, (os.cpu_count() or 1) // max(1, workers)))
+
+
 class CommandRunner:
     def __init__(self, verbose: bool = False):
         self.verbose = verbose
+        # Set by the worker scheduler to the number of workers of the run.
+        self.workers = 1
 
     def run(self, command: Command, cwd: Path, timeout: float | None) -> CommandResult:
         """Run `command` in `cwd`.
@@ -166,7 +219,9 @@ class CommandRunner:
         environment = os.environ.copy()
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
         _prefer_worker_sources(cwd, environment)
+        _share_cores(cwd, environment, self.workers)
         command = _prefer_worker_lua(cwd, environment, command)
+        _check_stopped()
         try:
             process = subprocess.Popen(
                 command,
@@ -184,7 +239,12 @@ class CommandRunner:
             return CommandResult(
                 code=127, timed_out=False, seconds=seconds, output=str(exc), launch_error=exc
             )
+        with _running_lock:
+            _running.add(process)
         try:
+            if _stopped is not None:
+                # The interrupt came between the launch and the registration.
+                _kill_group(process)
             output, _err = process.communicate(timeout=timeout)
             code = process.returncode if process.returncode is not None else 1
             timed_out = False
@@ -193,6 +253,11 @@ class CommandRunner:
             output, _err = process.communicate()
             code = 124
             timed_out = True
+        finally:
+            with _running_lock:
+                _running.discard(process)
+        # A command killed by the interrupt has no outcome, not a kill.
+        _check_stopped()
         seconds = time.monotonic() - started
         return CommandResult(code=code, timed_out=timed_out, seconds=seconds, output=output or "")
 
