@@ -42,11 +42,67 @@ _running_lock = threading.Lock()
 _stopped: int | None = None
 
 
-def _kill_group(process: subprocess.Popen) -> None:
+def _kill_group(process: subprocess.Popen, signum: int = signal.SIGKILL) -> bool:
+    """Signal the command's process group; False when the group is empty."""
+
     try:
-        os.killpg(process.pid, signal.SIGKILL)
+        os.killpg(process.pid, signum)
     except ProcessLookupError:
-        pass
+        return False
+    return True
+
+
+def _group_alive(process: subprocess.Popen) -> bool:
+    return _kill_group(process, 0)
+
+
+# How long a command's leftover children get to handle SIGTERM.
+REAP_GRACE = 1.0
+
+
+def _wait_unreaped(process: subprocess.Popen, timeout: float | None) -> bool:
+    """Wait for the leader to exit but leave it a zombie; False on timeout.
+
+    A zombie leader keeps its pid, so its group id cannot be reused by an
+    unrelated session while the leftovers are signalled.
+    """
+
+    if not hasattr(os, "waitid"):
+        # Without waitid the leader is reaped here, so the window stays open.
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return False
+        return True
+    deadline = None if timeout is None else time.monotonic() + timeout
+    delay = 0.0005
+    while os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None:
+        if deadline is not None and time.monotonic() >= deadline:
+            return False
+        time.sleep(delay)
+        delay = min(delay * 2, 0.05)
+    return True
+
+
+def _reap_group(process: subprocess.Popen) -> None:
+    """End what the exited command left in its group: SIGTERM, then SIGKILL.
+
+    The first signal goes out while the leader is an unreaped zombie, which
+    closes the pid-reuse window for it. Later probes run after the leader is
+    reaped and rely on the leftovers holding the group id; only a pid wrap
+    within one poll interval could misdirect them.
+    """
+
+    _kill_group(process, signal.SIGTERM)
+    process.wait()
+    deadline = time.monotonic() + REAP_GRACE
+    delay = 0.005
+    while _group_alive(process):
+        if time.monotonic() >= deadline:
+            _kill_group(process)
+            return
+        time.sleep(delay)
+        delay = min(delay * 2, 0.05)
 
 
 def stop_commands(signum: int) -> None:
@@ -262,25 +318,52 @@ class CommandRunner:
             )
         with _running_lock:
             _running.add(process)
+        # Read on a thread rather than through communicate(), which would reap
+        # the leader before its leftovers can be signalled. The reader closes
+        # the pipe itself: closing it here would block on a reader that an
+        # interrupt left waiting for a detached holder of the pipe.
+        chunks: list[str] = []
+        failures: list[BaseException] = []
+
+        def read() -> None:
+            try:
+                with process.stdout:
+                    chunks.append(process.stdout.read())
+            except BaseException as exc:  # Raised in run(), as communicate() would.
+                failures.append(exc)
+
+        reader = threading.Thread(target=read, daemon=True)
+        reader.start()
         try:
             if _stopped is not None:
                 # The interrupt came between the launch and the registration.
                 _kill_group(process)
-            output, _err = process.communicate(timeout=timeout)
-            code = process.returncode if process.returncode is not None else 1
-            timed_out = False
-        except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGKILL)
-            output, _err = process.communicate()
-            code = 124
-            timed_out = True
+            deadline = None if timeout is None else time.monotonic() + timeout
+            reader.join(timeout)
+            timed_out = reader.is_alive() or not _wait_unreaped(
+                process, None if deadline is None else max(0.0, deadline - time.monotonic())
+            )
+            if timed_out:
+                _kill_group(process)
+                reader.join()
+                process.wait()
+                code = 124
+            else:
+                seconds = time.monotonic() - started
+                _reap_group(process)
+                code = process.returncode if process.returncode is not None else 1
         finally:
             with _running_lock:
                 _running.discard(process)
         # A command killed by the interrupt has no outcome, not a kill.
         _check_stopped()
-        seconds = time.monotonic() - started
-        return CommandResult(code=code, timed_out=timed_out, seconds=seconds, output=output or "")
+        if failures:
+            raise failures[0]
+        if timed_out:
+            seconds = time.monotonic() - started
+        return CommandResult(
+            code=code, timed_out=timed_out, seconds=seconds, output="".join(chunks)
+        )
 
 
 def build_command(command: Command) -> Command | None:

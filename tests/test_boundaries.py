@@ -6,6 +6,8 @@ alone when no input can tell the operators apart.
 """
 
 import hashlib
+import io
+import signal
 import sys
 import threading
 from pathlib import Path
@@ -345,11 +347,15 @@ def test_a_process_without_a_return_code_counts_as_failure(monkeypatch, tmp_path
     class Proc:
         returncode = None
         pid = 1
+        stdout = io.StringIO("")
 
-        def communicate(self, timeout=None):
-            return (None, None)
+        def wait(self, timeout=None):
+            return None
 
     monkeypatch.setattr("mutator.runner.subprocess.Popen", lambda *args, **kwargs: Proc())
+    # The fake pid is init's; never signal or wait on it.
+    monkeypatch.setattr("mutator.runner._wait_unreaped", lambda process, timeout: True)
+    monkeypatch.setattr("mutator.runner._kill_group", lambda process, signum=signal.SIGKILL: False)
     result = CommandRunner().run("true", tmp_path, 5)
     assert result.code == 1
     assert result.output == ""
