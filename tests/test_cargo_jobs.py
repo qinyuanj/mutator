@@ -8,7 +8,7 @@ from mutator.runner import CommandRunner
 from mutator.workers import run_mutants
 
 
-def _sites(source, count):
+def _sites(count):
     return [
         Site("calc", "add", "defn/add", "add", 2, 22, 23, "1", str(value), "number", f"m{value}")
         for value in range(2, 2 + count)
@@ -22,7 +22,7 @@ def _run(tmp_path, workers):
     command = (f'"{sys.executable}" -c "import os; '
                f"open({str(log)!r}, 'a').write(os.environ.get('CARGO_BUILD_JOBS', '-') + '\\n')\"")
     outcomes = {}
-    run_mutants(tmp_path, source, source.read_bytes(), _sites(source, 6), workers, CommandRunner(),
+    run_mutants(tmp_path, source, source.read_bytes(), _sites(6), workers, CommandRunner(),
                 command, tmp_path, 10, "calc.py", outcomes)
     assert len(outcomes) == 6
     return log.read_text(encoding="utf-8").split()

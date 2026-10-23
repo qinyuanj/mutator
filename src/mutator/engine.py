@@ -17,7 +17,9 @@ from mutator.metrics import load_history, source_key, write_results
 from mutator.model import FormResult, RunResult, Site
 from mutator.report import format_scan
 from mutator.runner import Command, CommandRunner, display_command, run_tests, test_plan
-from mutator.workers import QueuedFile, WorkerBaselineError, WorkerPool, run_mutants, run_queue
+from mutator.workers import (
+    QueuedFile, WorkerBaselineError, WorkerPool, WorkerSlots, run_mutants, run_queue,
+)
 from mutator.timings import measure
 
 
@@ -364,7 +366,7 @@ def _apply_selected(
             check_command=check_command,
             check_timeout=check_timeout,
             confirmation=confirmation,
-            pool=worker_pool if standard_lua else None,
+            pool=worker_pool if standard_lua or language == "rust" else None,
         )
     except WorkerBaselineError as error:
         return _baseline_failure(file_key, command, str(error))
@@ -468,10 +470,13 @@ def mutate_file(
     max_workers: int | None = None,
     busted_task: str | None = None,
     lua_coverage: LuaCoverageIndex | None = None,
-    worker_pool: WorkerPool | None = None,
+    worker_pool: WorkerPool | WorkerSlots | None = None,
     select_specs: bool = False,
 ) -> RunResult:
-    """Mutate one file and write its namespaces into `.metrics/mutate`."""
+    """Mutate one file and write its namespaces into `.metrics/mutate`.
+
+    ``worker_pool`` is the run's Lua pool or its Rust worker slots.
+    """
 
     prepared = _prepare(path, root, covered_lines, ignore_coverage, mutate_all, lines,
                         test_command, mutation_warning)

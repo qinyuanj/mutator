@@ -24,7 +24,7 @@ _Avoid_: equivalent suite
 Spec files whose test behavior is unaffected by the presence, absence, or execution order of other spec files.
 
 **pristine worker check**:
-A run of a mutant's exact test command inside an unmutated worker before that command executes against mutated source. With the shared Lua worker pool, each distinct command is checked once per run and the remaining workers are validated structurally; `--paranoid-workers` restores one check per worker.
+A run of a mutant's exact test command inside an unmutated worker before that command executes against mutated source. With the shared Lua worker pool and with Rust worker slots, each distinct command is checked once per run and the remaining workers are validated structurally; `--paranoid-workers` restores one check per worker.
 
 **full-suite confirmation**:
 A second execution of a tentatively surviving mutant against the complete test scope. It establishes survival in that scope and does not establish independence between spec files.

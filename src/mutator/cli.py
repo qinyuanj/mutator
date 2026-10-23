@@ -15,7 +15,7 @@ from mutator.engine import mutate_file, mutate_queued, restore_backups, scan_fil
 from mutator.report import format_results, format_site_log
 from mutator.runner import CommandRunner, Interrupted, stop_commands
 from mutator import timings
-from mutator.workers import WorkerPool, discard_overlays
+from mutator.workers import WorkerPool, WorkerSlots, discard_overlays
 
 HELP = """\
 Usage: mutator [options] [path-or-filter ...]
@@ -96,7 +96,9 @@ Selected mutants of one file run at the same time, one worker per core unless
 mutants of the next file start while the current file finishes; each file's
 snapshot is written when its own mutants are done. A worker is a symlink
 overlay under target/mutation-workers with its own copy of the mutated file. The project tree
-is left unchanged. A copy left under target/mutator-backup/ by an interrupted
+is left unchanged. Rust workers keep their Cargo build output in
+target/mutation-workers/cargo-slot-<n>/target across runs; cargo clean
+removes it. A copy left under target/mutator-backup/ by an interrupted
 older run is restored before a non-scan run.
 
 Exit codes:
@@ -528,7 +530,8 @@ def _mutate_files(options: Options, root: Path, files: list[Path], indexes: dict
     survived = False
     results = {}
     lua_sources = [path for path in files if path.suffix == ".lua"]
-    with WorkerPool(root, lua_sources, check_each_worker=options.paranoid_workers) as worker_pool:
+    with (WorkerPool(root, lua_sources, check_each_worker=options.paranoid_workers) as worker_pool,
+          WorkerSlots(root, check_each_worker=options.paranoid_workers) as worker_slots):
         queued = [path for path in files if _shares_queue(options, path)]
         if queued:
             results.update(zip(queued, mutate_queued(
@@ -564,7 +567,7 @@ def _mutate_files(options: Options, root: Path, files: list[Path], indexes: dict
                 max_workers=options.max_workers,
                 busted_task=options.busted_task,
                 lua_coverage=_lua_index(root, path, indexes),
-                worker_pool=worker_pool if path.suffix == ".lua" else None,
+                worker_pool={".lua": worker_pool, ".rs": worker_slots}.get(path.suffix),
                 select_specs=options.select_specs,
             )
     for path in files:

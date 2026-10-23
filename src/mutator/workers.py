@@ -3,16 +3,23 @@
 Each worker is a directory under target/mutation-workers. Project files are
 linked in. Sources under test are private copies, so workers can mutate them
 without touching the original tree. A Lua run can retain a fixed overlay across
-files after validating restoration; other callers use per-file overlays.
+files after validating restoration; Rust runs in worker slots whose paths and
+Cargo targets persist across files and runs; other callers use per-file
+overlays.
 """
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import os
 import re
+import shutil
 import stat
+import subprocess
 import sys
+import time
+import tomllib
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -21,12 +28,14 @@ from queue import Empty, Queue
 from threading import Event, Lock
 
 from mutator.model import Site
-from mutator.runner import Command, run_tests
+from mutator.runner import SLOT_PREFIX, Command, run_tests
 from mutator.sites import apply_site
 from mutator.timings import measure, record
 
 # Build output and the worker tree itself must not be shared. A link to
 # ``target`` would point a worker at the directory that contains the worker.
+# Rust workers get their own build output instead: a slot target
+# (docs/adr/0004-rust-worker-slots-keep-cargo-target.md).
 SKIP_LINK = frozenset(
     {
         ".git",
@@ -100,11 +109,16 @@ def new_run_dir(root: Path) -> Path:
 
 
 def discard_overlays() -> None:
-    """Remove the overlays this process created and has not removed yet."""
+    """Remove the overlays this process created and has not removed yet.
+
+    Worker slots lose their overlay and keep their slot target.
+    """
 
     for directory in list(_created_runs):
         delete_tree(directory)
         _created_runs.discard(directory)
+    for slot in list(_held_slots):
+        delete_tree(slot / "worker")
 
 
 def symlink(link: Path, target: Path) -> None:
@@ -136,6 +150,13 @@ def delete_tree(path: Path) -> None:
     path.unlink()
 
 
+def _copy_mtime(copy: Path, source: Path) -> None:
+    """A copy as old as its source, so Cargo does not see a change."""
+
+    status = source.stat()
+    os.utime(copy, ns=(status.st_atime_ns, status.st_mtime_ns))
+
+
 def _copy_configs(worker: Path, root: Path, relative: str) -> None:
     for name in CONFIGS:
         source = root / name
@@ -144,6 +165,7 @@ def _copy_configs(worker: Path, root: Path, relative: str) -> None:
         if name == relative:
             continue
         (worker / name).write_bytes(source.read_bytes())
+        _copy_mtime(worker / name, source)
 
 
 def _link_children(worker_dir: Path, real_dir: Path, skip: set[str]) -> None:
@@ -296,6 +318,17 @@ def _overlay(worker: Path, root: Path, relative: str, original: bytes) -> None:
     destination = worker.joinpath(*segments)
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_bytes(original)
+    if (root / relative).read_bytes() == original:
+        _copy_mtime(destination, root / relative)
+
+
+def _build_worker(worker: Path, root: Path, relative: str, original: bytes, importers) -> None:
+    worker.mkdir(parents=True, exist_ok=True)
+    _copy_configs(worker, root, relative)
+    _link_children(worker, root, {relative.split("/", 1)[0]})
+    _overlay(worker, root, relative, original)
+    for importer in importers:
+        _copy_importer(worker, root, importer)
 
 
 def create_workers(
@@ -303,22 +336,29 @@ def create_workers(
     *, start: int = 0,
 ) -> list[Path]:
     created = []
-    first = relative.split("/", 1)[0]
     importers = importers_of(root, relative)
     try:
         for index in range(start, start + count):
             worker = base / f"worker-{index}"
-            worker.mkdir(parents=True, exist_ok=True)
-            _copy_configs(worker, root, relative)
-            _link_children(worker, root, {first})
-            _overlay(worker, root, relative, original)
-            for importer in importers:
-                _copy_importer(worker, root, importer)
+            _build_worker(worker, root, relative, original, importers)
             created.append(worker)
     except BaseException:
         delete_tree(base)
         raise
     return created
+
+
+def _write_fresh(path: Path, data: bytes) -> None:
+    """Write ``data`` and stamp it with the fine-grained current time.
+
+    Cargo treats a source no newer than its last build as unchanged. The
+    kernel stamps a write with a clock that can lag the build's own stamp by
+    a tick, so the time is set explicitly (docs/adr/0004).
+    """
+
+    path.write_bytes(data)
+    now = time.time_ns()
+    os.utime(path, ns=(now, now))
 
 
 def mapped_cwd(worker: Path, root: Path, cwd: Path) -> Path:
@@ -357,7 +397,7 @@ def _execute(
     if validate is not None:
         validate(directory)
     mutated = apply_site(original.decode("utf-8"), site.start, site.end, site.mutant)
-    destination.write_bytes(mutated.encode("utf-8"))
+    _write_fresh(destination, mutated.encode("utf-8"))
     try:
         result = run_tests(runner, command, mapped_cwd(directory, root, cwd), timeout)
         record(phase, getattr(result, "seconds", 0.0))
@@ -380,7 +420,7 @@ def _execute(
                     f"Worker source binding removed in {directory}") from error
             if replaced:
                 raise WorkerBaselineError(f"Worker source binding replaced in {directory}")
-        destination.write_bytes(original)
+        _write_fresh(destination, original)
     if validate is not None:
         validate(directory)
     if result.launch_error is not None:
@@ -649,14 +689,192 @@ class WorkerPool:
             self.validate_directory(directory)
 
     def check(self, directory, root, cwd, runner, command, timeout):
-        mapped = mapped_cwd(directory, root, cwd)
-        if not mapped.is_relative_to(directory.resolve()):
-            raise WorkerBaselineError(f"Worker working directory escapes overlay: {cwd}")
-        key = (directory, str(mapped),
-               ("shell", command) if isinstance(command, str) else ("argv", *command))
-        if key not in self.checked:
-            _check_worker(directory, root, cwd, runner, command, timeout)
-            self.checked.add(key)
+        _check_once(self.checked, directory, root, cwd, runner, command, timeout)
+
+
+def _check_once(checked: set, directory, root, cwd, runner, command, timeout) -> None:
+    mapped = mapped_cwd(directory, root, cwd)
+    if not mapped.is_relative_to(directory.resolve()):
+        raise WorkerBaselineError(f"Worker working directory escapes overlay: {cwd}")
+    key = (directory, str(mapped),
+           ("shell", command) if isinstance(command, str) else ("argv", *command))
+    if key not in checked:
+        _check_worker(directory, root, cwd, runner, command, timeout)
+        checked.add(key)
+
+
+# Slots this process holds, so an interrupt can remove their overlays.
+_held_slots: set[Path] = set()
+
+
+def _seed(root: Path, target: Path) -> None:
+    """Start a new slot target from the project's own debug build, if any.
+
+    Copied with mtimes so Cargo's fingerprints stay fresh; a reflink makes
+    the copy cheap where the filesystem allows. Without one the slot builds
+    cold once.
+    """
+
+    source = root / "target" / "debug"
+    if target.exists() or not source.is_dir():
+        return
+    partial = target.with_name(target.name + ".partial")
+    delete_tree(partial)
+    partial.mkdir(parents=True)
+    copied = subprocess.run(
+        ["cp", "-a", "--reflink=auto", str(source), str(partial / "debug")],
+        capture_output=True, text=True,
+    )
+    if copied.returncode != 0:
+        print(f"Could not seed {target} from {source}; building cold.\n{copied.stderr}",
+              file=sys.stderr)
+        delete_tree(partial)
+        return
+    partial.rename(target)
+
+
+def _package_name(root: Path, relative: str) -> str | None:
+    """The Cargo package that owns ``relative``: the nearest manifest with one."""
+
+    directory = (root / relative).parent
+    while True:
+        manifest = directory / "Cargo.toml"
+        if manifest.is_file():
+            try:
+                name = tomllib.loads(manifest.read_text(encoding="utf-8")).get("package", {}).get("name")
+            except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+                name = None
+            if isinstance(name, str):
+                return name
+        if directory == root or directory.parent == directory:
+            return None
+        directory = directory.parent
+
+
+def _invalidate(root: Path, target: Path, relative: str) -> None:
+    """Make Cargo rebuild the package of a source a previous file mutated.
+
+    Its last build in this slot may be of a mutant, and the overlay now links
+    the original, whose mtime is older than that build. Removing the
+    package's fingerprints is what makes Cargo rebuild it.
+    """
+
+    if not target.is_dir():
+        return
+    name = _package_name(root, relative)
+    entries = [entry for fingerprints in [*target.glob("*/.fingerprint"), *target.glob("*/*/.fingerprint")]
+               for entry in fingerprints.iterdir()]
+    pattern = re.compile(re.escape(name or "") + r"-[0-9a-f]{16}")
+    matched = [entry for entry in entries if name is not None and pattern.fullmatch(entry.name)]
+    if entries and not matched:
+        # An unrecognised package or fingerprint layout: a cold build is
+        # slower, a reused mutant build is wrong.
+        print(f"Cannot find the Cargo fingerprints of {relative} in {target}; "
+              "discarding the slot target.", file=sys.stderr)
+        delete_tree(target)
+        return
+    for entry in matched:
+        shutil.rmtree(entry)
+
+
+class WorkerSlots:
+    """Rust worker slots: fixed overlays whose Cargo targets persist.
+
+    Slot n is ``target/mutation-workers/cargo-slot-<n>``: ``worker`` is the
+    overlay, rebuilt from the project tree for every file at the same path;
+    ``target`` is the slot target that every command in the slot builds into;
+    ``lock`` is held for the run, so a concurrent mutator takes another
+    number; ``mutated`` names the sources whose package may hold a mutant
+    build. Each overlay is compared structurally around every mutant. A
+    failure discards the overlays; the next file rebuilds them.
+    (docs/adr/0004-rust-worker-slots-keep-cargo-target.md)
+    """
+
+    def __init__(self, root: Path, check_each_worker: bool = True):
+        self.root = root.resolve()
+        self.check_each_worker = check_each_worker
+        self.slots: list[Path] = []
+        self.locks: list[int] = []
+        self.states: dict[Path, dict] = {}
+        self.checked: set = set()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.release()
+
+    def _acquire(self) -> None:
+        base = self.root / "target" / "mutation-workers"
+        number = 0
+        while True:
+            slot = base / f"{SLOT_PREFIX}{number}"
+            number += 1
+            if slot in self.slots:
+                continue
+            slot.mkdir(parents=True, exist_ok=True)
+            descriptor = os.open(slot / "lock", os.O_RDWR | os.O_CREAT, 0o644)
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                os.close(descriptor)
+                continue
+            self.slots.append(slot)
+            self.locks.append(descriptor)
+            _held_slots.add(slot)
+            return
+
+    def prepare(self, relative, original, count):
+        while len(self.slots) < count:
+            self._acquire()
+        importers = importers_of(self.root, relative)
+        directories = []
+        try:
+            for index, slot in enumerate(self.slots):
+                worker = slot / "worker"
+                delete_tree(worker)
+                self.states.pop(worker, None)
+                if index >= count:
+                    continue
+                _seed(self.root, slot / "target")
+                marker = slot / "mutated"
+                if marker.is_file():
+                    for previous in marker.read_text(encoding="utf-8").splitlines():
+                        _invalidate(self.root, slot / "target", previous)
+                # Written before any mutant, so an interrupted run is undone too.
+                marker.write_text(relative + "\n", encoding="utf-8")
+                _build_worker(worker, self.root, relative, original, importers)
+                self.states[worker] = _worker_state(worker)
+                directories.append(worker)
+        except BaseException:
+            self.close()
+            raise
+        return directories
+
+    def validate_directory(self, directory):
+        if _worker_state(directory) != self.states.get(directory):
+            raise WorkerBaselineError(f"Worker restoration failed in {directory}")
+
+    def validate(self):
+        for directory in self.states:
+            self.validate_directory(directory)
+
+    def check(self, directory, root, cwd, runner, command, timeout):
+        _check_once(self.checked, directory, root, cwd, runner, command, timeout)
+
+    def close(self):
+        """Remove the overlays. Slot targets and locks stay."""
+
+        for slot in self.slots:
+            delete_tree(slot / "worker")
+        self.states.clear()
+
+    def release(self):
+        self.close()
+        for slot, descriptor in zip(self.slots, self.locks):
+            _held_slots.discard(slot)
+            os.close(descriptor)
+        self.slots, self.locks = [], []
 
 
 def run_mutants(

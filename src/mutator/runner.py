@@ -67,18 +67,38 @@ def _check_stopped() -> None:
         raise Interrupted(_stopped)
 
 
+# A Rust worker slot's directory name, followed by its number.
+SLOT_PREFIX = "cargo-slot-"
+
+
 def _worker_home(cwd: Path) -> Path | None:
-    """The overlay root when cwd is inside target/mutation-workers."""
+    """The overlay root when cwd is inside target/mutation-workers.
+
+    A run overlay is ``run-<uuid>/worker-<n>``; a Rust worker slot's is
+    ``cargo-slot-<n>/worker``.
+    """
 
     for candidate in [cwd, *cwd.parents]:
         parent = candidate.parent
-        if not candidate.name.startswith("worker-"):
-            continue
-        if not parent.name.startswith("run-"):
+        run = candidate.name.startswith("worker-") and parent.name.startswith("run-")
+        slot = candidate.name == "worker" and parent.name.startswith(SLOT_PREFIX)
+        if not (run or slot):
             continue
         if parent.parent.name == "mutation-workers" and parent.parent.parent.name == "target":
             return candidate
     return None
+
+
+def _use_slot_target(cwd: Path, environment: dict) -> None:
+    """Point Cargo in a worker slot at that slot's own, kept build output."""
+
+    worker = _worker_home(cwd.resolve())
+    if worker is None or not worker.parent.name.startswith(SLOT_PREFIX):
+        return
+    target = str(worker.parent / "target")
+    environment["CARGO_TARGET_DIR"] = target
+    # A configured build-dir would otherwise be shared by every slot.
+    environment["CARGO_BUILD_BUILD_DIR"] = target
 
 
 def _source_entries(cwd: Path, worker: Path) -> list[str]:
@@ -220,6 +240,7 @@ class CommandRunner:
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
         _prefer_worker_sources(cwd, environment)
         _share_cores(cwd, environment, self.workers)
+        _use_slot_target(cwd, environment)
         command = _prefer_worker_lua(cwd, environment, command)
         _check_stopped()
         try:

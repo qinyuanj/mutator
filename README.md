@@ -40,7 +40,9 @@ Each worker is a directory under `target/mutation-workers`. Lua schedules
 previous survivors first within each file to reduce a long final tail; history
 changes execution order only. The file being mutated is a private copy. A module that reaches that file through a relative import is copied too, so Node resolves the import to the private copy. The rest of the tree is linked. The original source stays unchanged. Workers are removed after success, setup failure, or runtime failure.
 
-For Lua's shared worker pool, each distinct pristine command is checked once
+Rust runs in worker slots, `target/mutation-workers/cargo-slot-<n>/`, whose paths stay the same across files and runs. Each slot has an overlay, `worker/`, rebuilt from the project tree for every file, and a slot target, `target/`, that every command in the slot uses as `CARGO_TARGET_DIR`. A mutant therefore rebuilds only the mutated crate and its dependants instead of the whole dependency tree. A new slot target starts as a copy of the project's `target/debug` when it exists (mtimes kept, reflinked where the filesystem allows); otherwise the slot builds cold once. Every mutated or restored source gets the current time as its mtime, and a package mutated by a previous file or run has its fingerprints removed from the slot target, so Cargo never reuses a mutant's build. A slot is locked for the run; a concurrent mutator on the same project takes the next free number. Slot targets are kept after the run and after an interrupt; `cargo clean` removes them with the rest of `target/`. See [ADR 0004](docs/adr/0004-rust-worker-slots-keep-cargo-target.md).
+
+For Lua's shared worker pool and Rust's worker slots, each distinct pristine command is checked once
 per run, not once per worker; every worker's overlay is still compared
 structurally before and after use. `--paranoid-workers` restores a full
 pristine run in every worker.

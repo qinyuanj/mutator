@@ -17,6 +17,20 @@ fixed because workspace-crate fingerprints include it, so an interrupted run
 removes the overlay contents and keeps the slot target. Slot targets are
 removed only by `cargo clean`.
 
+The mtime rule alone does not cover a source that goes back to being a link.
+When the next file (or run) is prepared, the previous file's private copy is
+replaced by a link to the original, whose mtime is older than the slot's last
+build of that file's mutant; Cargo would call that build fresh. Each slot
+therefore records the source it is about to mutate in `cargo-slot-<n>/mutated`
+before any mutant runs, and the next prepare removes that package's
+fingerprints from the slot target. The record is written first so an
+interrupted or killed run is undone the same way. When the package or its fingerprints cannot
+be recognised, the whole slot target is discarded instead: a cold build is
+slower, a reused mutant build is wrong. The mtime is set from the
+fine-grained clock rather than left to the kernel's write stamp, which can
+fall in the same tick as Cargo's own build stamp; Cargo treats an equal mtime
+as unchanged.
+
 ## Considered Options
 
 - Overlays stay in `run-*`: only registry crates are reused across runs, and
