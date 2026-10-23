@@ -28,3 +28,9 @@ A run of a mutant's exact test command inside an unmutated worker before that co
 
 **full-suite confirmation**:
 A second execution of a tentatively surviving mutant against the complete test scope. It establishes survival in that scope and does not establish independence between spec files.
+
+**worker slot**:
+A Rust worker position with a fixed number and path that persists across files and runs of the same project.
+
+**slot target**:
+The Cargo build output owned by one worker slot and kept across runs.
