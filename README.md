@@ -161,6 +161,10 @@ early under `--no-keep-going` (`docs/adr/0003-covering-specs-first.md`). Each
 Lua test run is capped at 2 GiB of address space so a runaway mutant fails
 instead of exhausting memory; `MUTATOR_LUA_MEMORY_MB` sets the cap and `0`
 removes it.
+A timed Rust test run in a worker slot is killed once its process group
+keeps more than 2 GiB resident, and the mutant counts as killed; the build
+before it is not capped. `MUTATOR_RUST_MEMORY_MB` sets the cap and `0`
+removes it.
 
 A fresh Lua coverage run doubles as the test baseline: the suite already
 passed, so it does not run again, and the mutant timeout derives from the

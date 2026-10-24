@@ -256,6 +256,59 @@ def _memory_limit(command: Command):
     return apply
 
 
+_RUST_MEMORY_MB = 2048
+
+
+def _resident_cap(cwd: Path, timeout: float | None) -> int | None:
+    """Bytes a timed test run in a Rust worker slot may keep resident.
+
+    A Rust test harness reserves far more address space than it touches, so
+    RLIMIT_AS would fail pristine runs; the group's resident size is polled
+    instead. The untimed build before it is not capped. The pristine viewer
+    suite peaks near 135 MB; a runaway mutant reached 12.8 GB before its
+    timeout. `MUTATOR_RUST_MEMORY_MB=0` disables the cap.
+    """
+
+    if timeout is None or not Path("/proc/self/statm").is_file():
+        return None
+    worker = _worker_home(cwd.resolve())
+    if worker is None or not worker.parent.name.startswith(SLOT_PREFIX):
+        return None
+    megabytes = int(os.environ.get("MUTATOR_RUST_MEMORY_MB", _RUST_MEMORY_MB))
+    return megabytes * 1024 * 1024 if megabytes > 0 else None
+
+
+def _group_resident(group: int) -> int:
+    """Resident bytes of every process in the process group."""
+
+    page = os.sysconf("SC_PAGE_SIZE")
+    total = 0
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+            if int(fields[2]) == group:
+                total += int((entry / "statm").read_text().split()[1]) * page
+        except (OSError, IndexError, ValueError):
+            continue
+    return total
+
+
+def _join_within(reader: threading.Thread, process, timeout, cap) -> bool:
+    """Join the reader until the timeout; False when the group passed the cap."""
+
+    if cap is None:
+        reader.join(timeout)
+        return True
+    deadline = time.monotonic() + timeout
+    while reader.is_alive() and time.monotonic() < deadline:
+        if _group_resident(process.pid) > cap:
+            return False
+        reader.join(min(0.2, max(0.0, deadline - time.monotonic())))
+    return True
+
+
 def display_command(command: Command) -> str:
     """A shell-looking rendering. A list is quoted so it can be pasted."""
 
@@ -334,16 +387,27 @@ class CommandRunner:
 
         reader = threading.Thread(target=read, daemon=True)
         reader.start()
+        cap = _resident_cap(cwd, timeout)
+        over_cap = False
         try:
             if _stopped is not None:
                 # The interrupt came between the launch and the registration.
                 _kill_group(process)
             deadline = None if timeout is None else time.monotonic() + timeout
-            reader.join(timeout)
-            timed_out = reader.is_alive() or not _wait_unreaped(
+            over_cap = not _join_within(reader, process, timeout, cap)
+            timed_out = not over_cap and (reader.is_alive() or not _wait_unreaped(
                 process, None if deadline is None else max(0.0, deadline - time.monotonic())
-            )
-            if timed_out:
+            ))
+            if over_cap:
+                # A failure like any other: the mutant counts as killed.
+                _kill_group(process)
+                reader.join()
+                process.wait()
+                seconds = time.monotonic() - started
+                code = 137
+                megabytes = cap // (1024 * 1024)
+                chunks.append(f"\nmutator: test run exceeded {megabytes} MiB resident; killed\n")
+            elif timed_out:
                 _kill_group(process)
                 reader.join()
                 process.wait()
