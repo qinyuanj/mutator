@@ -82,6 +82,12 @@ def format_decisions(results: list[RunResult], *, verbose: bool = False) -> str:
     lines = [*details, *(f"Decisions {name}: {_counts(counts)}" for name, counts in functions.values())]
     why = " ".join(f"{reason}={count}" for reason, count in sorted(reasons.items()))
     lines.append(f"Decisions total: {_counts(total)} ({why})")
+    # The results table counts reused sites like run ones; say how many were not run.
+    if total["reused"]:
+        lines.append(
+            f"Reused {total['reused']} of {sum(total.values())} sites "
+            "from the previous snapshot without running them."
+        )
     return "\n".join(lines) + "\n"
 
 

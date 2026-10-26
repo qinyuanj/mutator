@@ -116,6 +116,7 @@ def test_decisions_are_counted_per_function_and_per_run():
         "Decisions demo/sub: executed=1 reused=0 uncovered=0 excluded=0\n"
         "Decisions total: executed=2 reused=1 uncovered=1 excluded=0 "
         "(no-history=1 previous-survived=1 unchanged-killed=1 uncovered=1)\n"
+        "Reused 1 of 4 sites from the previous snapshot without running them.\n"
     )
 
 
@@ -138,6 +139,7 @@ def test_the_cli_prints_the_run_decisions(tmp_path, capsys):
     run(args)
     out = capsys.readouterr().out
     assert "Decisions total: executed=4 reused=0 uncovered=0 excluded=0 (no-history=4)" in out
+    assert "Reused" not in out
     assert " reason=" not in out
     run([*args, "--verbose"])
     out = capsys.readouterr().out
