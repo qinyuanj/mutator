@@ -206,7 +206,41 @@ def test_engine_worker_failure_keeps_completed_snapshots(tmp_path, monkeypatch):
     assert results[1].baseline_failed and "restoration" in results[1].baseline_message
     assert published == [("src/a.lua", {"a.lua2": "survived"})]
     assert all(source.read_bytes() == b"return 1\n" for source in sources)
-    assert engine.restore_backups(tmp_path) == []
+    assert not (tmp_path / "target" / "mutator-backup").exists()
+
+
+class EditingEngineRunner(EngineRunner):
+    """Saves or deletes a.lua in the project tree while one of its mutants runs."""
+
+    def __init__(self, root, delete=False):
+        super().__init__()
+        self.root = root
+        self.delete = delete
+
+    def run(self, command, cwd, timeout):
+        held = mutated(cwd)
+        source = self.root / "src" / "a.lua"
+        if held and held[0] == "a.lua" and source.exists():
+            if self.delete:
+                source.unlink()
+            else:
+                source.write_bytes(b"return 2\n")
+        return super().run(command, cwd, timeout)
+
+
+@pytest.mark.parametrize("delete, change", [(False, "changed"), (True, "was deleted")],
+                         ids=["edited", "deleted"])
+def test_engine_edit_during_the_queue_keeps_it_and_the_other_snapshots(tmp_path, monkeypatch, delete, change):
+    engine, sources, published = engine_fixture(tmp_path, monkeypatch)
+    with WorkerPool(tmp_path, sources, check_each_worker=False) as pool:
+        results = mutate(engine, tmp_path, sources, EditingEngineRunner(tmp_path, delete), pool,
+                         max_workers=1)
+    assert f"src/a.lua {change} during the mutation run" in results[0].source_changed
+    assert results[0].written == []
+    assert not results[1].source_changed
+    assert published == [("src/b.lua", {"b.lua2": "survived", "b.lua3": "killed"})]
+    assert (not sources[0].exists()) if delete else sources[0].read_bytes() == b"return 2\n"
+    assert sources[1].read_bytes() == b"return 1\n"
 
 
 def test_queue_outcomes_match_file_by_file_runs(tmp_path):

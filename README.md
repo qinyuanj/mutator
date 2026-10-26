@@ -30,7 +30,7 @@ The first run of a tree executes every covered mutant. Start with the file you a
 
 Once a snapshot exists, the next run is differential. It reruns survivors and every site in a function whose text changed. Killed mutants in an unchanged function stay killed. `--since-last-run` is that same selection. `--mutate-all` ignores it.
 
-Exit `0` when every executed mutant was killed. Exit `2` when the baseline tests fail. Exit `3` when a mutant survives; this is a valid result with published snapshots. A baseline failure takes precedence over survivors from other sources and does not rewrite the failed source's snapshot.
+Exit `0` when every executed mutant was killed. Exit `2` when the baseline tests fail. Exit `3` when a mutant survives; this is a valid result with published snapshots. Exit `4` when a source changed during the run; that file's snapshot is not written. A baseline failure takes precedence over a changed source, and both take precedence over survivors from other sources. A baseline failure does not rewrite the failed source's snapshot.
 
 ## Workers
 
@@ -51,7 +51,7 @@ Every command run inside a worker gets `CARGO_BUILD_JOBS` set to the cores divid
 
 SIGTERM or SIGINT (Ctrl-C) stops the run: mutator kills the running test processes, restores and removes its overlays, writes no snapshot for a file whose mutants did not all finish, and exits with 128 plus the signal number (143 or 130). The original sources are never modified.
 
-The baseline still runs once, in the real tree, before any worker starts. The mutant command then runs inside the worker, in the same directory it would have used in the real tree, so a relative path such as `src` or `./pkg` refers to the overlay. A copy left under `target/mutator-backup/` by an interrupted older run is restored before a non-scan run.
+The baseline still runs once, in the real tree, before any worker starts. The mutant command then runs inside the worker, in the same directory it would have used in the real tree, so a relative path such as `src` or `./pkg` refers to the overlay. mutator never writes to a project source. If `target/mutator-backup/` holds files from an older version, a non-scan run stops before any test runs and leaves the sources and backups for you to compare. A source edited or deleted during a run is kept as it is.
 
 ## Snapshot
 

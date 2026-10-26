@@ -23,21 +23,24 @@ from mutator.workers import (
 from mutator.timings import measure
 
 
-def restore_backups(root: Path) -> list[Path]:
-    """Put back sources left mutated by a killed run."""
+class StaleBackupsError(RuntimeError):
+    """Backups from a mutator that still mutated the project tree."""
+
+
+def restore_backups(root: Path) -> None:
+    """Refuse to run while an older mutator's backups are present.
+
+    Mutants only touch worker copies now, so a backup can only come from an
+    older run. It records no bytes that run last wrote, so it cannot prove the
+    source is still the mutant it left; nothing is written back.
+    """
 
     base = root / "target" / "mutator-backup"
-    restored: list[Path] = []
-    if not base.is_dir():
-        return restored
-    for backup in sorted(path for path in base.rglob("*") if path.is_file()):
-        relative = backup.relative_to(base)
-        target = root / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(backup.read_bytes())
-        backup.unlink()
-        restored.append(target)
-    return restored
+    if base.is_dir() and any(path.is_file() for path in base.rglob("*")):
+        raise StaleBackupsError(
+            f"Found backups from an older mutator under {base}. Stopping before any test runs; "
+            "the sources and backups were left untouched. Compare them, then remove the directory."
+        )
 
 
 def _drop_bytecode(path: Path) -> None:
@@ -48,15 +51,6 @@ def _drop_bytecode(path: Path) -> None:
         return
     for item in cache.glob(path.stem + ".*.pyc"):
         item.unlink(missing_ok=True)
-
-
-def _backup(root: Path, path: Path, original: bytes) -> Path:
-    relative = path.resolve().relative_to(root.resolve())
-    backup = root / "target" / "mutator-backup" / relative
-    backup.parent.mkdir(parents=True, exist_ok=True)
-    if not backup.exists():
-        backup.write_bytes(original)
-    return backup
 
 
 def _covered(site: Site, lines: set[int] | None, ignore_coverage: bool) -> bool:
@@ -383,9 +377,29 @@ def _statuses(found: list[Site], covered: dict[str, bool], outcomes: dict[str, s
     return statuses
 
 
-def _restore_if_dirty(path: Path, original: bytes) -> None:
+def _source_change(path: Path, file_key: str, original: bytes) -> str:
+    """Name an edit made to the project source during the run, never undoing it."""
+
+    if not path.is_file():
+        return (f"{file_key} was deleted during the mutation run; "
+                "its snapshot was not written and the file was left deleted.")
     if path.read_bytes() != original:
-        path.write_bytes(original)
+        return (f"{file_key} changed during the mutation run; "
+                "its snapshot was not written and the edit was kept.")
+    return ""
+
+
+def _note_change(failure: RunResult, path: Path, original: bytes) -> RunResult:
+    change = _source_change(path, failure.path, original)
+    if change:
+        failure.baseline_message += f"\n{change}"
+    return failure
+
+
+def _report_change(path: Path, file_key: str, original: bytes) -> None:
+    change = _source_change(path, file_key, original)
+    if change:
+        print(change, file=sys.stderr)
 
 
 @dataclass
@@ -442,9 +456,12 @@ def _prepare(
 
 def _publish(prepared: _Prepared) -> RunResult:
     p = prepared
+    change = _source_change(p.path, p.file_key, p.original)
+    if change:
+        # The outcomes were measured against bytes that are gone.
+        return RunResult(path=p.file_key, forms=[], written=[], source_changed=change)
     forms = _forms(p.source, p.path, p.root, p.file_key, p.found, p.covered, p.outcomes, p.lines)
     written = write_results(p.root, p.file_key, forms, p.outcomes)
-    _restore_if_dirty(p.path, p.original)
     return RunResult(
         path=p.file_key,
         forms=forms,
@@ -482,26 +499,30 @@ def mutate_file(
                         test_command, mutation_warning)
     if isinstance(prepared, RunResult):
         return prepared
-    failure = _apply_selected(
-        prepared.path,
-        prepared.root,
-        prepared.original,
-        prepared.selected,
-        runner,
-        prepared.language,
-        test_command,
-        timeout_factor,
-        prepared.file_key,
-        baselines,
-        prepared.outcomes,
-        max_workers,
-        busted_task,
-        lua_coverage,
-        worker_pool,
-        select_specs,
-    )
+    try:
+        failure = _apply_selected(
+            prepared.path,
+            prepared.root,
+            prepared.original,
+            prepared.selected,
+            runner,
+            prepared.language,
+            test_command,
+            timeout_factor,
+            prepared.file_key,
+            baselines,
+            prepared.outcomes,
+            max_workers,
+            busted_task,
+            lua_coverage,
+            worker_pool,
+            select_specs,
+        )
+    except BaseException:
+        _report_change(prepared.path, prepared.file_key, prepared.original)
+        raise
     if failure is not None:
-        return failure
+        return _note_change(failure, prepared.path, prepared.original)
     return _publish(prepared)
 
 
@@ -544,7 +565,7 @@ def mutate_queued(
         plan = _baseline_plan(item.path, item.root, runner, item.language, None, busted_task, baselines,
                        timeout_factor, item.file_key, lua_coverage)
         if isinstance(plan, RunResult):
-            results[position] = plan
+            results[position] = _note_change(plan, item.path, item.original)
             continue
         command, cwd, timeout = plan
         prepared[position] = item
@@ -571,7 +592,14 @@ def mutate_queued(
     except WorkerBaselineError as error:
         for position, job in jobs.items():
             if position not in results:
-                results[position] = _baseline_failure(job.file_key, job.command, str(error))
+                item = prepared[position]
+                results[position] = _note_change(
+                    _baseline_failure(job.file_key, job.command, str(error)), item.path, item.original)
+    except BaseException:
+        for position, item in prepared.items():
+            if position not in results:
+                _report_change(item.path, item.file_key, item.original)
+        raise
     return [results[position] for position in range(len(files))]
 
 

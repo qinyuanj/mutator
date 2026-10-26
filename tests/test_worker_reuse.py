@@ -215,7 +215,7 @@ def test_failed_worker_never_checks_next_command_on_dirty_data(tmp_path):
         assert [command for command, _ in runner.checks] == ["first"]
 
 
-@pytest.mark.parametrize("change", ["bytes", "link", "extra", "original"])
+@pytest.mark.parametrize("change", ["bytes", "link", "extra"])
 def test_reuse_rejects_binding_or_restoration_changes(tmp_path, change):
     sources = fixture(tmp_path)
     with WorkerPool(tmp_path, sources) as pool:
@@ -227,11 +227,24 @@ def test_reuse_rejects_binding_or_restoration_changes(tmp_path, change):
         elif change == "link":
             destination.unlink()
             destination.symlink_to(sources[0])
-        elif change == "extra":
-            (worker / "cache").write_text("stale runtime state")
         else:
-            sources[0].write_bytes(b"return 9\n")
+            (worker / "cache").write_text("stale runtime state")
         outcomes = {}
         with pytest.raises(WorkerBaselineError):
             run(tmp_path, sources[1], Runner(), pool, outcomes=outcomes)
         assert outcomes == {}
+
+
+@pytest.mark.parametrize("prepared", [True, False], ids=["reused", "fresh"])
+def test_an_edited_bound_source_does_not_reach_other_files(tmp_path, prepared):
+    sources = fixture(tmp_path)
+    runner = Runner()
+    with WorkerPool(tmp_path, sources) as pool:
+        if prepared:
+            run(tmp_path, sources[0], runner, pool)
+        sources[0].write_bytes(b"return 9\n")
+        before = len(runner.calls)
+        outcomes = run(tmp_path, sources[1], runner, pool)
+    assert outcomes == {"b.lua2": "survived", "b.lua3": "killed"}
+    assert all(values[0] == b"return 1\n" for _, _, values in runner.calls[before:])
+    assert sources[0].read_bytes() == b"return 9\n"

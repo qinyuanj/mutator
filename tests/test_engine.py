@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from mutator.engine import mutate_file, restore_backups
+from mutator.engine import StaleBackupsError, mutate_file, restore_backups
 from mutator.edn import loads
 from mutator.metrics import snapshot_path
 from mutator.runner import CommandResult
@@ -371,15 +371,97 @@ def test_a_mutation_run_leaves_the_project_tree_unchanged(tmp_path):
     assert [item for item in (tmp_path / "target").rglob("*") if item.is_file()] == []
 
 
-def test_restore_backups_puts_an_interrupted_mutant_back(tmp_path):
+def test_restore_backups_refuses_and_leaves_sources_and_backups_alone(tmp_path):
     source = tmp_path / "src" / "demo.py"
     source.parent.mkdir()
-    source.write_text("original\n", encoding="utf-8")
+    source.write_text("edited later\n", encoding="utf-8")
     backup = tmp_path / "target" / "mutator-backup" / "src" / "demo.py"
     backup.parent.mkdir(parents=True)
     backup.write_text("original\n", encoding="utf-8")
-    source.write_text("mutated\n", encoding="utf-8")
-    restored = restore_backups(tmp_path)
-    assert restored == [source]
-    assert source.read_text(encoding="utf-8") == "original\n"
-    assert not backup.exists()
+    with pytest.raises(StaleBackupsError, match="mutator-backup"):
+        restore_backups(tmp_path)
+    assert source.read_text(encoding="utf-8") == "edited later\n"
+    assert backup.read_text(encoding="utf-8") == "original\n"
+
+
+class EditingRunner(FakeRunner):
+    """Changes the project source once its baseline has run in the real tree."""
+
+    def __init__(self, root, edit, *, fail_baseline=False, raise_baseline=False):
+        super().__init__()
+        self.root = root
+        self.edit = edit
+        self.fail_baseline = fail_baseline
+        self.raise_baseline = raise_baseline
+
+    def run(self, command, cwd, timeout):
+        result = super().run(command, cwd, timeout)
+        if cwd == self.root and self.edit is not None:
+            self.edit(self.root / "src" / "demo.py")
+            self.edit = None
+            if self.raise_baseline:
+                raise OSError("runner broke")
+            if self.fail_baseline:
+                return CommandResult(code=1, timed_out=False, seconds=0.01, output="")
+        return result
+
+
+def run_editing(tmp_path, runner):
+    return mutate_file(
+        tmp_path / "src" / "demo.py",
+        tmp_path,
+        runner=runner,
+        covered_lines=None,
+        ignore_coverage=True,
+        mutate_all=True,
+        lines=None,
+        test_command="fake",
+        timeout_factor=10,
+        mutation_warning=50,
+        baselines={},
+    )
+
+
+EDITED = SOURCE + "# saved by the user\n"
+
+
+@pytest.mark.parametrize("edit, kept", [
+    (lambda path: path.write_text(EDITED, encoding="utf-8"), EDITED),
+    (lambda path: path.unlink(), None),
+], ids=["edited", "deleted"])
+def test_a_source_changed_during_the_run_is_kept_and_gets_no_snapshot(tmp_path, edit, kept):
+    path = tmp_path / "src" / "demo.py"
+    path.parent.mkdir()
+    path.write_text(SOURCE, encoding="utf-8")
+    result = run_editing(tmp_path, EditingRunner(tmp_path, edit))
+    assert "src/demo.py" in result.source_changed
+    assert result.written == []
+    assert not snapshot_path(tmp_path, "demo").exists()
+    if kept is None:
+        assert not path.exists()
+    else:
+        assert path.read_text(encoding="utf-8") == kept
+
+
+def test_a_baseline_failure_mentions_a_source_edited_during_it(tmp_path):
+    path = tmp_path / "src" / "demo.py"
+    path.parent.mkdir()
+    path.write_text(SOURCE, encoding="utf-8")
+    runner = EditingRunner(tmp_path, lambda source: source.write_text(EDITED, encoding="utf-8"),
+                           fail_baseline=True)
+    result = run_editing(tmp_path, runner)
+    assert result.baseline_failed
+    assert "src/demo.py changed during the mutation run" in result.baseline_message
+    assert path.read_text(encoding="utf-8") == EDITED
+
+
+def test_an_exception_keeps_a_source_edited_during_the_run(tmp_path, capsys):
+    path = tmp_path / "src" / "demo.py"
+    path.parent.mkdir()
+    path.write_text(SOURCE, encoding="utf-8")
+    runner = EditingRunner(tmp_path, lambda source: source.write_text(EDITED, encoding="utf-8"),
+                           raise_baseline=True)
+    with pytest.raises(OSError, match="runner broke"):
+        run_editing(tmp_path, runner)
+    assert path.read_text(encoding="utf-8") == EDITED
+    assert "src/demo.py changed during the mutation run" in capsys.readouterr().err

@@ -11,7 +11,7 @@ from pathlib import Path
 
 from mutator.crapper_link import ensure_crapper
 from mutator.coverage import covered_lines
-from mutator.engine import mutate_file, mutate_queued, restore_backups, scan_file
+from mutator.engine import StaleBackupsError, mutate_file, mutate_queued, restore_backups, scan_file
 from mutator.report import format_results, format_site_log
 from mutator.runner import CommandRunner, Interrupted, stop_commands
 from mutator import timings
@@ -98,14 +98,17 @@ snapshot is written when its own mutants are done. A worker is a symlink
 overlay under target/mutation-workers with its own copy of the mutated file. The project tree
 is left unchanged. Rust workers keep their Cargo build output in
 target/mutation-workers/cargo-slot-<n>/target across runs; cargo clean
-removes it. A copy left under target/mutator-backup/ by an interrupted
-older run is restored before a non-scan run.
+removes it. mutator never writes to a project source. A non-scan run
+refuses to start while target/mutator-backup/ holds files from an older
+version, and leaves them and the sources for you to compare. A source
+edited or deleted during a run is kept as it is and gets no snapshot.
 
 Exit codes:
   0  every executed mutant was killed, or there was nothing to run
   1  usage error
-  2  baseline tests failed
+  2  baseline tests failed, or the run could not start
   3  at least one mutant survived
+  4  a source changed during the run; its snapshot was not written
 
 Coverage, when it is produced, uses the same commands as crapper:
   Clojure      clj -M:cov --lcov
@@ -465,11 +468,6 @@ def _require_crapper() -> str | None:
     return None
 
 
-def _restore(root: Path) -> None:
-    for path in restore_backups(root):
-        print(f"Restored {path} from an interrupted mutation.", file=sys.stderr)
-
-
 def _scan(options: Options, root: Path, files: list[Path]) -> int:
     for path in files:
         print(
@@ -492,6 +490,9 @@ def _record(result, forms: list, written: list[str]) -> str:
     if result.baseline_failed:
         print(result.baseline_message, file=sys.stderr)
         return "baseline"
+    if result.source_changed:
+        print(result.source_changed, file=sys.stderr)
+        return "changed"
     print(format_site_log(result.sites, result.statuses), end="")
     forms.extend(result.forms)
     written.extend(result.written)
@@ -500,9 +501,11 @@ def _record(result, forms: list, written: list[str]) -> str:
     return "ok"
 
 
-def _finish(baseline_failed: bool, survived: bool) -> int:
+def _finish(baseline_failed: bool, changed: bool, survived: bool) -> int:
     if baseline_failed:
         return 2
+    if changed:
+        return 4
     if survived:
         return 3
     return 0
@@ -527,6 +530,7 @@ def _mutate_files(options: Options, root: Path, files: list[Path], indexes: dict
     forms = []
     written: list[str] = []
     baseline_failed = False
+    changed = False
     survived = False
     results = {}
     lua_sources = [path for path in files if path.suffix == ".lua"]
@@ -574,13 +578,15 @@ def _mutate_files(options: Options, root: Path, files: list[Path], indexes: dict
         outcome = _record(results[path], forms, written)
         if outcome == "baseline":
             baseline_failed = True
+        elif outcome == "changed":
+            changed = True
         elif outcome == "survived":
             survived = True
     if forms:
         print(format_results(forms), end="")
     for path in written:
         print(f"Wrote {path}", file=sys.stderr)
-    return _finish(baseline_failed, survived)
+    return _finish(baseline_failed, changed, survived)
 
 
 UNSUPPORTED_PLATFORM = (
@@ -653,7 +659,11 @@ def run(argv: list[str] | None = None) -> int:
         print("No source files to mutate.")
         return 0
     if not options.scan:
-        _restore(root)
+        try:
+            restore_backups(root)
+        except StaleBackupsError as error:
+            print(error, file=sys.stderr)
+            return 2
         from mutator.engine import needs_mutation
 
         if not any(needs_mutation(path, root, mutate_all=options.mutate_all, lines=options.lines)

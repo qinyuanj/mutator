@@ -290,7 +290,7 @@ def _expand_directory(link: Path, real_dir: Path) -> None:
         symlink(link / child.name, child)
 
 
-def _copy_importer(worker: Path, root: Path, relative: str) -> None:
+def _copy_importer(worker: Path, root: Path, relative: str, data: bytes | None = None) -> None:
     real = root
     current = worker
     for segment in relative.split("/")[:-1]:
@@ -304,8 +304,10 @@ def _copy_importer(worker: Path, root: Path, relative: str) -> None:
     if destination.is_symlink():
         destination.unlink()
     elif destination.exists():
+        if data is not None and destination.read_bytes() != data:
+            destination.write_bytes(data)
         return
-    destination.write_bytes((root / relative).read_bytes())
+    destination.write_bytes((root / relative).read_bytes() if data is None else data)
 
 
 def _overlay(worker: Path, root: Path, relative: str, original: bytes) -> None:
@@ -318,8 +320,9 @@ def _overlay(worker: Path, root: Path, relative: str, original: bytes) -> None:
     destination = worker.joinpath(*segments)
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_bytes(original)
-    if (root / relative).read_bytes() == original:
-        _copy_mtime(destination, root / relative)
+    source = root / relative
+    if source.is_file() and source.read_bytes() == original:
+        _copy_mtime(destination, source)
 
 
 def _build_worker(worker: Path, root: Path, relative: str, original: bytes, importers) -> None:
@@ -646,13 +649,11 @@ class WorkerPool:
         if self.base is None:
             self.base = new_run_dir(self.root)
             try:
-                self.project_state = _worker_state(self.root, project=True)
+                self.project_state = self._project_state()
                 self.directories = create_workers(
                     self.base, self.root, relative, original, count)
                 for directory in self.directories:
-                    for name in self.sources:
-                        _copy_importer(directory, self.root, name)
-                    self.states[directory] = _worker_state(directory)
+                    self._bind(directory)
             except BaseException:
                 self.close()
                 raise
@@ -662,26 +663,39 @@ class WorkerPool:
                 self.base, self.root, relative, original,
                 count - len(self.directories), start=len(self.directories))
             for directory in added:
-                for name in self.sources:
-                    _copy_importer(directory, self.root, name)
-                self.states[directory] = _worker_state(directory)
+                self._bind(directory)
             self.directories.extend(added)
         return self.directories[:count]
+
+    def _bind(self, directory):
+        """Give the worker the bound bytes, not what the real tree holds now."""
+        for name, data in self.sources.items():
+            _copy_importer(directory, self.root, name, data)
+        self.states[directory] = _worker_state(directory)
 
     def validate_directory(self, directory):
         if _worker_state(directory) != self.states[directory]:
             self.failed = True
             raise WorkerBaselineError(f"Worker restoration failed in {directory}")
 
+    def _project_state(self):
+        """The real tree's fingerprint, without the bound sources.
+
+        Every worker holds its own copy of them, so an edit to one in the real
+        tree cannot reach another file's mutants. The engine checks each
+        source itself before publishing it.
+        """
+        state = _worker_state(self.root, project=True)
+        for name in self.sources:
+            state.pop(name, None)
+            state.pop(name + "/@contents", None)
+        return state
+
     def validate_project(self):
         """The real tree only. Safe while workers hold mutants of other files."""
-        if _worker_state(self.root, project=True) != self.project_state:
+        if self._project_state() != self.project_state:
             self.failed = True
             raise WorkerBaselineError("Project inputs changed during worker reuse")
-        for name, original in self.sources.items():
-            if (self.root / name).read_bytes() != original:
-                self.failed = True
-                raise WorkerBaselineError(f"Original source changed during worker reuse: {name}")
 
     def validate(self):
         self.validate_project()

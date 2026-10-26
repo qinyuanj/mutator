@@ -79,3 +79,4 @@ class RunResult:
     baseline_failed: bool = False
     baseline_message: str = ""
     skipped: str = ""
+    source_changed: str = ""
