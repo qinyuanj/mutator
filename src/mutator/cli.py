@@ -12,7 +12,7 @@ from pathlib import Path
 from mutator.crapper_link import ensure_crapper
 from mutator.coverage import covered_lines
 from mutator.engine import StaleBackupsError, mutate_file, mutate_queued, restore_backups, scan_file
-from mutator.report import format_results, format_site_log
+from mutator.report import format_decisions, format_results, format_site_log
 from mutator.runner import CommandRunner, Interrupted, stop_commands
 from mutator import timings
 from mutator.workers import WorkerPool, WorkerSlots, discard_overlays
@@ -78,7 +78,8 @@ Options:
                                 instead of once per command. The other workers
                                 are always compared structurally.
   --timings                     Print phase totals and mean mutant duration.
-  --verbose                     Print each test command and each mutant.
+  --verbose                     Print each test command, each mutant, and each
+                                site's run decision.
 
 Arguments:
   path              File or directory to mutate. Test paths are skipped.
@@ -574,8 +575,11 @@ def _mutate_files(options: Options, root: Path, files: list[Path], indexes: dict
                 worker_pool={".lua": worker_pool, ".rs": worker_slots}.get(path.suffix),
                 select_specs=options.select_specs,
             )
+    published = []
     for path in files:
         outcome = _record(results[path], forms, written)
+        if outcome in ("ok", "survived"):
+            published.append(results[path])
         if outcome == "baseline":
             baseline_failed = True
         elif outcome == "changed":
@@ -584,6 +588,7 @@ def _mutate_files(options: Options, root: Path, files: list[Path], indexes: dict
             survived = True
     if forms:
         print(format_results(forms), end="")
+    print(format_decisions(published, verbose=options.verbose), end="")
     for path in written:
         print(f"Wrote {path}", file=sys.stderr)
     return _finish(baseline_failed, changed, survived)
@@ -664,11 +669,17 @@ def run(argv: list[str] | None = None) -> int:
         except StaleBackupsError as error:
             print(error, file=sys.stderr)
             return 2
-        from mutator.engine import needs_mutation
+        from mutator.engine import reused_run
 
-        if not any(needs_mutation(path, root, mutate_all=options.mutate_all, lines=options.lines)
-                   for path in files):
+        reused = []
+        for path in files:
+            result = reused_run(path, root, mutate_all=options.mutate_all, lines=options.lines)
+            if result is None:
+                break
+            reused.append(result)
+        else:
             print("No mutations selected; keeping the previous snapshots.")
+            print(format_decisions(reused, verbose=options.verbose), end="")
             return 0
     timings.reset()
     with timings.measure("coverage"):

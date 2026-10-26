@@ -16,6 +16,9 @@ A mutant whose selected test command passes. Survival is relative to that comman
 **uncovered mutant**:
 A mutation site whose source line has no recorded execution coverage. It has no executed mutation outcome.
 
+**run decision**:
+What one run did with a mutation site (executed, reused, uncovered or excluded), the reason, and the site's previous outcome. A reused site carries forward a killed outcome without executing.
+
 **spec-file selection**:
 A test scope containing the spec files recorded as executing a mutant's source line.
 _Avoid_: equivalent suite

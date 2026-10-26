@@ -69,6 +69,22 @@ class History:
     outcomes: dict[str, str] = field(default_factory=dict)
 
 
+ACTIONS = ("executed", "reused", "uncovered", "excluded")
+
+
+@dataclass(frozen=True)
+class Decision:
+    """What one run did with a site, and why (docs/adr/0005-run-decisions.md).
+
+    ``action`` is one of ``ACTIONS``. ``previous`` is the
+    site's outcome in the last snapshot, or ``none``.
+    """
+
+    action: str
+    reason: str
+    previous: str
+
+
 @dataclass
 class RunResult:
     path: str
@@ -76,6 +92,7 @@ class RunResult:
     written: list[str]
     sites: list[Site] = field(default_factory=list)
     statuses: dict[str, str] = field(default_factory=dict)
+    decisions: dict[str, Decision] = field(default_factory=dict)
     baseline_failed: bool = False
     baseline_message: str = ""
     skipped: str = ""

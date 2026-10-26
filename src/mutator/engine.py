@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 from mutator.crapper_link import ensure_crapper
 from mutator.functions import form_digests, form_spans, sites_in_file
 from mutator.metrics import load_history, source_key, write_results
-from mutator.model import FormResult, RunResult, Site
+from mutator.model import Decision, FormResult, RunResult, Site
 from mutator.report import format_scan
 from mutator.runner import Command, CommandRunner, display_command, run_tests, test_plan
 from mutator.workers import (
@@ -61,30 +61,43 @@ def _covered(site: Site, lines: set[int] | None, ignore_coverage: bool) -> bool:
     return site.line in lines
 
 
-def _select(
+def _decide(
     sites: list[Site],
     covered: dict[str, bool],
     history,
     digests: dict[tuple[str, str], str],
     mutate_all: bool,
     lines: set[int] | None,
-) -> list[Site]:
-    chosen = []
+) -> dict[str, Decision]:
+    """Every site's run decision; the executed ones are the selection."""
+
+    decisions = {}
     for site in sites:
-        if not covered[site.mutation_id]:
-            continue
-        if lines is not None and site.line not in lines:
-            continue
+        previous = history.outcomes.get(site.mutation_id, "none")
         key = (site.namespace, site.form_id)
         prior = history.forms.get(key)
-        unchanged = prior is not None and prior.digest == digests.get(key)
-        if mutate_all or not unchanged:
-            chosen.append(site)
-            continue
-        if history.outcomes.get(site.mutation_id) == "killed":
-            continue
-        chosen.append(site)
-    return chosen
+        if not covered[site.mutation_id]:
+            action, reason = "uncovered", "uncovered"
+        elif lines is not None and site.line not in lines:
+            action, reason = "excluded", "line-filter"
+        elif mutate_all:
+            action, reason = "executed", "explicit-all"
+        elif prior is None:
+            action, reason = "executed", "no-history"
+        elif prior.digest != digests.get(key):
+            action, reason = "executed", "digest-changed"
+        elif previous == "killed":
+            action, reason = "reused", "unchanged-killed"
+        elif previous == "survived":
+            action, reason = "executed", "previous-survived"
+        else:
+            action, reason = "executed", "id-changed"
+        decisions[site.mutation_id] = Decision(action, reason, previous)
+    return decisions
+
+
+def _select(sites: list[Site], decisions: dict[str, Decision]) -> list[Site]:
+    return [site for site in sites if decisions[site.mutation_id].action == "executed"]
 
 
 def _carry_forward(sites: list[Site], covered: dict[str, bool], history, digests) -> dict[str, str]:
@@ -417,6 +430,7 @@ class _Prepared:
     lines: set[int] | None
     selected: list[Site]
     outcomes: dict[str, str]
+    decisions: dict[str, Decision]
 
 
 def _prepare(
@@ -445,13 +459,14 @@ def _prepare(
     _warn_uncovered(file_key, found, covered_lines, ignore_coverage)
     history = load_history(root, file_key)
     digests = form_digests(source, path, root)
-    selected = _select(found, covered, history, digests, mutate_all, lines)
+    decisions = _decide(found, covered, history, digests, mutate_all, lines)
+    selected = _select(found, decisions)
     if language == "lua" and not test_command:
         selected.sort(key=lambda site: history.outcomes.get(site.mutation_id) != "survived")
     outcomes = _carry_forward(found, covered, history, digests)
     _warn_many(file_key, selected, mutation_warning)
     return _Prepared(path, root, language, file_key, original, source, found, covered, lines,
-                     selected, outcomes)
+                     selected, outcomes, decisions)
 
 
 def _publish(prepared: _Prepared) -> RunResult:
@@ -468,6 +483,7 @@ def _publish(prepared: _Prepared) -> RunResult:
         written=[item.as_posix() for item in written],
         sites=p.found,
         statuses=_statuses(p.found, p.covered, p.outcomes),
+        decisions=p.decisions,
     )
 
 
@@ -606,26 +622,37 @@ def mutate_queued(
 def needs_mutation(
     path: Path, root: Path, *, mutate_all: bool = False, lines: set[int] | None = None,
 ) -> bool:
-    """Prove an unchanged, fully killed selection needs no coverage or tests.
+    return reused_run(path, root, mutate_all=mutate_all, lines=lines) is None
 
-    Treat every site as covered so a previous coverage gap cannot be silently
-    carried forward. Empty files still take the normal snapshot publication path.
+
+def reused_run(
+    path: Path, root: Path, *, mutate_all: bool = False, lines: set[int] | None = None,
+) -> RunResult | None:
+    """The run decisions of a file that needs no coverage or tests, or None.
+
+    Prove an unchanged, fully killed selection by treating every site as
+    covered, so a previous coverage gap cannot be silently carried forward.
+    Empty files still take the normal snapshot publication path.
     """
 
     decoded = _decode(path)
     if decoded is None:
-        return True
+        return None
     _original, source = decoded
     file_key = source_key(path, root)
     sites = sites_in_file(source, path, root, file_key)
     history = load_history(root, file_key)
     if not sites or not history.forms:
-        return True
+        return None
     digests = form_digests(source, path, root)
     if digests != {key: prior.digest for key, prior in history.forms.items()}:
-        return True
-    return bool(_select(sites, {site.mutation_id: True for site in sites},
-                        history, digests, mutate_all, lines))
+        return None
+    decisions = _decide(sites, {site.mutation_id: True for site in sites},
+                        history, digests, mutate_all, lines)
+    if _select(sites, decisions):
+        return None
+    return RunResult(path=file_key, forms=[], written=[], sites=sites,
+                     statuses=dict(history.outcomes), decisions=decisions)
 
 
 def scan_file(

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from mutator.model import FormResult, Site
+from mutator.model import ACTIONS, FormResult, RunResult, Site
 
 
 def _score(form: FormResult) -> str:
@@ -44,6 +44,45 @@ def format_results(forms: list[FormResult]) -> str:
     )
     lines.append("")
     return "\n".join(lines)
+
+
+def _counts(counts: dict[str, int]) -> str:
+    return " ".join(f"{action}={counts[action]}" for action in ACTIONS)
+
+
+def format_decisions(results: list[RunResult], *, verbose: bool = False) -> str:
+    """What this run did with each site, apart from the snapshot's totals.
+
+    One count line per function and one for the run; ``verbose`` adds a line
+    per site.
+    """
+
+    total = dict.fromkeys(ACTIONS, 0)
+    reasons: dict[str, int] = {}
+    functions: dict[tuple[str, str, str], tuple[str, dict[str, int]]] = {}
+    details = []
+    for result in results:
+        for site in result.sites:
+            decision = result.decisions.get(site.mutation_id)
+            if decision is None:
+                continue
+            total[decision.action] += 1
+            reasons[decision.reason] = reasons.get(decision.reason, 0) + 1
+            name = f"{site.namespace}/{site.name}"
+            key = (site.file, site.namespace, site.form_id)
+            functions.setdefault(key, (name, dict.fromkeys(ACTIONS, 0)))[1][decision.action] += 1
+            if verbose:
+                details.append(
+                    f"{site.file}:{site.line} {name} {site.description} {decision.action} "
+                    f"reason={decision.reason} previous={decision.previous} "
+                    f"result={result.statuses.get(site.mutation_id, 'none')} id={site.mutation_id}"
+                )
+    if not functions:
+        return ""
+    lines = [*details, *(f"Decisions {name}: {_counts(counts)}" for name, counts in functions.values())]
+    why = " ".join(f"{reason}={count}" for reason, count in sorted(reasons.items()))
+    lines.append(f"Decisions total: {_counts(total)} ({why})")
+    return "\n".join(lines) + "\n"
 
 
 def format_site_log(sites: list[Site], status: dict[str, str]) -> str:

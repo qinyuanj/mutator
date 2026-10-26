@@ -30,6 +30,8 @@ The first run of a tree executes every covered mutant. Start with the file you a
 
 Once a snapshot exists, the next run is differential. It reruns survivors and every site in a function whose text changed. Killed mutants in an unchanged function stay killed. `--since-last-run` is that same selection. `--mutate-all` ignores it.
 
+After the results table, each run reports what it decided for every site, apart from the snapshot's totals: a `Decisions <namespace>/<function>:` line per function and a `Decisions total:` line count the sites `executed`, `reused` (a killed outcome carried forward), `uncovered` and `excluded` (outside `--lines`), and the total line breaks them down by reason. `--verbose` adds one line per site with its action, reason, previous outcome and result. The reasons are listed in `docs/adr/0005-run-decisions.md`.
+
 Exit `0` when every executed mutant was killed. Exit `2` when the baseline tests fail. Exit `3` when a mutant survives; this is a valid result with published snapshots. Exit `4` when a source changed during the run; that file's snapshot is not written. A baseline failure takes precedence over a changed source, and both take precedence over survivors from other sources. A baseline failure does not rewrite the failed source's snapshot.
 
 ## Workers
