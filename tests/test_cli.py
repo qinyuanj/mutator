@@ -4,10 +4,9 @@ from pathlib import Path
 
 import pytest
 
+from mutator.cli import HELP, UNSUPPORTED_PLATFORM, parse_args, run
 from mutator.edn import loads
 from mutator.metrics import snapshot_path
-
-from mutator.cli import parse_args, run
 from mutator.runner import CommandResult
 
 
@@ -134,6 +133,142 @@ def test_baseline_launch_failure_returns_2_and_preserves_snapshot(tmp_path, monk
 def test_lines_option_parses_positive_numbers():
     options = parse_args(["--lines", "2, 4", "src/demo.py"])
     assert options.lines == {2, 4}
+
+
+def test_every_option_lands_in_its_field():
+    options = parse_args(
+        [
+            "-s",
+            "a",
+            "--source-root",
+            "b",
+            "--root",
+            "proj",
+            "--coverage-command",
+            "make cov",
+            "--test-command",
+            "make test",
+            "--timeout-factor",
+            "2.5",
+            "--mutation-warning",
+            "7",
+            "--max-workers",
+            "1",
+            "--lines",
+            "3,,5",
+            "--use-existing-coverage",
+            "--changed",
+            "--since-last-run",
+            "--verbose",
+            "src/demo.py",
+            "demo",
+        ]
+    )
+    assert options.action == "mutate"
+    assert options.exit_code == 0
+    assert options.source_roots == ["a", "b"]
+    assert options.project_root == Path("proj")
+    assert options.coverage_command == "make cov"
+    assert options.test_command == "make test"
+    assert options.timeout_factor == 2.5
+    assert options.mutation_warning == 7
+    assert options.max_workers == 1
+    assert options.lines == {3, 5}
+    assert options.use_existing_coverage is True
+    assert options.changed is True
+    assert options.since_last_run is True
+    assert options.verbose is True
+    assert options.positionals == ["src/demo.py", "demo"]
+    flags = parse_args(["--no-coverage", "--scan"])
+    assert flags.no_coverage is True
+    assert flags.scan is True
+    assert flags.mutate_all is False
+    assert parse_args(["--mutate-all"]).mutate_all is True
+    lua = parse_args(["--busted-task", "fast", "--select-specs", "--paranoid-workers", "--timings"])
+    assert lua.busted_task == "fast"
+    assert (lua.select_specs, lua.paranoid_workers, lua.timings) == (True, True, True)
+    assert parse_args(["--full-suite"]).full_suite is True
+
+
+def test_defaults_without_arguments():
+    options = parse_args([])
+    assert options.action == "mutate"
+    assert options.project_root == Path(".")
+    assert options.source_roots == []
+    assert options.positionals == []
+    assert options.lines is None
+    assert options.timeout_factor == 10.0
+    assert options.mutation_warning == 50
+    assert options.max_workers is None
+    assert options.coverage_command is None
+    assert options.test_command is None
+    assert not any(
+        [
+            options.scan,
+            options.mutate_all,
+            options.since_last_run,
+            options.no_coverage,
+            options.use_existing_coverage,
+            options.changed,
+            options.verbose,
+        ]
+    )
+
+
+@pytest.mark.parametrize(
+    ("argv", "message"),
+    [
+        (["--root"], "--root requires a value"),
+        (["-s", "--scan"], "-s requires a value"),
+        (["--test-command", ""], "--test-command requires a value"),
+        (["--bogus"], "Unknown option: --bogus"),
+        (["-"], "Unknown option: -"),
+        (["--timeout-factor", "0"], "--timeout-factor requires a positive number"),
+        (["--timeout-factor", "fast"], "could not convert string to float: 'fast'"),
+        (["--mutation-warning", "many"], "invalid literal for int() with base 10: 'many'"),
+        (["--max-workers", "0"], "--max-workers requires a positive integer"),
+        (["--max-workers", "two"], "--max-workers requires a positive integer"),
+        (["--lines", "0"], "--lines requires positive line numbers"),
+        (["--lines", " , "], "--lines requires a line number"),
+        (["--lines", "x"], "invalid literal for int() with base 10: 'x'"),
+        (["--mutate-all", "--since-last-run"], "--mutate-all cannot be combined with --since-last-run"),
+        (["--no-coverage", "--coverage-command", "c"], "--no-coverage cannot be combined with --coverage-command"),
+        (["--scan", "--mutate-all"], "--scan cannot be combined with --mutate-all"),
+        (["--max-workers", "2", "--scan"], "--scan cannot be combined with --max-workers"),
+        (["--select-specs", "--full-suite"], "--select-specs cannot be combined with --full-suite"),
+        (["--busted-task", "t", "--test-command", "c"], "--busted-task cannot be combined with --test-command"),
+    ],
+)
+def test_usage_errors_name_the_problem_above_the_help(argv, message):
+    options = parse_args(argv)
+    assert options.action == "help"
+    assert options.exit_code == 1
+    assert options.message == f"{message}\n\n{HELP}"
+
+
+def test_a_bad_option_wins_over_a_conflict_and_help_wins_over_both():
+    assert parse_args(["--scan", "--mutate-all", "--bogus"]).message.startswith("Unknown option: --bogus\n")
+    assert parse_args(["--mutate-all", "--since-last-run", "--scan"]).message.startswith("--mutate-all cannot")
+    helped = parse_args(["--bogus", "-h"])
+    assert helped.exit_code == 0
+    assert helped.message == HELP
+
+
+def test_run_reports_a_missing_crapper(monkeypatch, capsys):
+    def missing():
+        raise ImportError("crapper not found")
+
+    monkeypatch.setattr("mutator.cli.ensure_crapper", missing)
+    assert run(["--scan"]) == 2
+    assert capsys.readouterr().err == "crapper not found\n"
+
+
+def test_native_windows_prints_the_platform_warning_and_stops(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr("mutator.cli.sys.platform", "win32")
+    assert run(["--scan", "--no-coverage", "--root", str(tmp_path)]) == 1
+    captured = capsys.readouterr()
+    assert captured.err == UNSUPPORTED_PLATFORM + "\n"
+    assert captured.out == ""
 
 
 def test_changed_selects_a_dirty_source_file(tmp_path, monkeypatch, capsys):

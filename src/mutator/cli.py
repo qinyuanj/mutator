@@ -183,6 +183,88 @@ def _lines(value: str) -> set[int]:
     return found
 
 
+def _timeout(value: str) -> float:
+    factor = float(value)
+    if factor <= 0:
+        raise ValueError("--timeout-factor requires a positive number")
+    return factor
+
+
+# Option -> (field, converter). A list field collects every value.
+_VALUES = {
+    "-s": ("source_roots", str),
+    "--source-root": ("source_roots", str),
+    "--root": ("project_root", Path),
+    "--coverage-command": ("coverage_command", str),
+    "--test-command": ("test_command", str),
+    "--busted-task": ("busted_task", str),
+    "--timeout-factor": ("timeout_factor", _timeout),
+    "--mutation-warning": ("mutation_warning", int),
+    "--max-workers": ("max_workers", _workers),
+    "--lines": ("lines", _lines),
+}
+
+_FLAGS = {
+    "--no-coverage": "no_coverage",
+    "--use-existing-coverage": "use_existing_coverage",
+    "--reuse-coverage": "use_existing_coverage",
+    "--changed": "changed",
+    "--scan": "scan",
+    "--mutate-all": "mutate_all",
+    "--since-last-run": "since_last_run",
+    "--select-specs": "select_specs",
+    "--full-suite": "full_suite",
+    "--paranoid-workers": "paranoid_workers",
+    "--timings": "timings",
+    "--verbose": "verbose",
+}
+
+# A set field is truthy: values are never empty and --max-workers is positive.
+_CONFLICTS = (
+    ("select_specs", "full_suite", "--select-specs cannot be combined with --full-suite"),
+    ("busted_task", "test_command", "--busted-task cannot be combined with --test-command"),
+    ("mutate_all", "since_last_run", "--mutate-all cannot be combined with --since-last-run"),
+    ("no_coverage", "coverage_command", "--no-coverage cannot be combined with --coverage-command"),
+    ("scan", "mutate_all", "--scan cannot be combined with --mutate-all"),
+    ("scan", "max_workers", "--scan cannot be combined with --max-workers"),
+)
+
+
+def _set_value(options: Options, arg: str, value: str) -> None:
+    name, convert = _VALUES[arg]
+    if name == "source_roots":
+        getattr(options, name).append(convert(value))
+    else:
+        setattr(options, name, convert(value))
+
+
+def _consume(options: Options, args: list[str], index: int) -> int:
+    """Apply the argument at ``index``. Returns the index of the next one."""
+
+    arg = args[index]
+    if arg in _VALUES:
+        _set_value(options, arg, _take(args, index, arg))
+        return index + 2
+    if arg in _FLAGS:
+        setattr(options, _FLAGS[arg], True)
+        return index + 1
+    if arg.startswith("-"):
+        raise ValueError(f"Unknown option: {arg}")
+    options.positionals.append(arg)
+    return index + 1
+
+
+def _conflict(options: Options) -> str | None:
+    for first, second, message in _CONFLICTS:
+        if getattr(options, first) and getattr(options, second):
+            return message
+    return None
+
+
+def _usage(message: str) -> Options:
+    return Options(action="help", message=f"{message}\n\n{HELP}", exit_code=1)
+
+
 def parse_args(argv: list[str] | None = None) -> Options:
     args = list(sys.argv[1:] if argv is None else argv)
     if any(arg in {"-h", "--help"} for arg in args):
@@ -191,131 +273,12 @@ def parse_args(argv: list[str] | None = None) -> Options:
     index = 0
     try:
         while index < len(args):
-            arg = args[index]
-            if arg in {"-s", "--source-root"}:
-                options.source_roots.append(_take(args, index, arg))
-                index += 2
-                continue
-            if arg == "--root":
-                options.project_root = Path(_take(args, index, arg))
-                index += 2
-                continue
-            if arg == "--coverage-command":
-                options.coverage_command = _take(args, index, arg)
-                index += 2
-                continue
-            if arg == "--test-command":
-                options.test_command = _take(args, index, arg)
-                index += 2
-                continue
-            if arg == "--busted-task":
-                options.busted_task = _take(args, index, arg)
-                index += 2
-                continue
-            if arg == "--timeout-factor":
-                options.timeout_factor = float(_take(args, index, arg))
-                if options.timeout_factor <= 0:
-                    raise ValueError("--timeout-factor requires a positive number")
-                index += 2
-                continue
-            if arg == "--mutation-warning":
-                options.mutation_warning = int(_take(args, index, arg))
-                index += 2
-                continue
-            if arg == "--max-workers":
-                options.max_workers = _workers(_take(args, index, arg))
-                index += 2
-                continue
-            if arg == "--lines":
-                options.lines = _lines(_take(args, index, arg))
-                index += 2
-                continue
-            if arg == "--no-coverage":
-                options.no_coverage = True
-                index += 1
-                continue
-            if arg in {"--use-existing-coverage", "--reuse-coverage"}:
-                options.use_existing_coverage = True
-                index += 1
-                continue
-            if arg == "--changed":
-                options.changed = True
-                index += 1
-                continue
-            if arg == "--scan":
-                options.scan = True
-                index += 1
-                continue
-            if arg == "--mutate-all":
-                options.mutate_all = True
-                index += 1
-                continue
-            if arg == "--since-last-run":
-                options.since_last_run = True
-                index += 1
-                continue
-            if arg == "--select-specs":
-                options.select_specs = True
-                index += 1
-                continue
-            if arg == "--full-suite":
-                options.full_suite = True
-                index += 1
-                continue
-            if arg == "--paranoid-workers":
-                options.paranoid_workers = True
-                index += 1
-                continue
-            if arg == "--timings":
-                options.timings = True
-                index += 1
-                continue
-            if arg == "--verbose":
-                options.verbose = True
-                index += 1
-                continue
-            if arg.startswith("-"):
-                raise ValueError(f"Unknown option: {arg}")
-            options.positionals.append(arg)
-            index += 1
+            index = _consume(options, args, index)
     except ValueError as exc:
-        return Options(action="help", message=f"{exc}\n\n{HELP}", exit_code=1)
-    if options.select_specs and options.full_suite:
-        return Options(
-            action="help",
-            message=f"--select-specs cannot be combined with --full-suite\n\n{HELP}",
-            exit_code=1,
-        )
-    if options.busted_task is not None and options.test_command is not None:
-        return Options(
-            action="help",
-            message=f"--busted-task cannot be combined with --test-command\n\n{HELP}",
-            exit_code=1,
-        )
-    if options.mutate_all and options.since_last_run:
-        return Options(
-            action="help",
-            message=f"--mutate-all cannot be combined with --since-last-run\n\n{HELP}",
-            exit_code=1,
-        )
-    if options.no_coverage and options.coverage_command:
-        return Options(
-            action="help",
-            message=f"--no-coverage cannot be combined with --coverage-command\n\n{HELP}",
-            exit_code=1,
-        )
-    if options.scan and options.mutate_all:
-        return Options(
-            action="help",
-            message=f"--scan cannot be combined with --mutate-all\n\n{HELP}",
-            exit_code=1,
-        )
-    if options.scan and options.max_workers is not None:
-        return Options(
-            action="help",
-            message=f"--scan cannot be combined with --max-workers\n\n{HELP}",
-            exit_code=1,
-        )
+        return _usage(str(exc))
+    conflict = _conflict(options)
+    if conflict:
+        return _usage(conflict)
     return options
 
 
