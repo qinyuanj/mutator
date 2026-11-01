@@ -369,7 +369,10 @@ class CommandRunner:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
-                text=True,
+                # A mutant can split a multibyte string; its output is only
+                # read for the log, so bad bytes must not lose the outcome.
+                encoding="utf-8",
+                errors="replace",
                 env=environment,
                 preexec_fn=_memory_limit(command),
             )

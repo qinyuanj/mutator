@@ -325,3 +325,13 @@ def test_a_timeout_survives_a_process_group_that_cannot_be_signalled(tmp_path, m
     result = CommandRunner().run(f"{sys.executable} -c 'import time; time.sleep(30)'", tmp_path, 0.5)
     assert (result.code, result.timed_out) == (124, True)
     assert result.seconds < 10
+
+
+def test_output_that_is_not_utf8_still_yields_a_result(tmp_path):
+    # A mutant can cut a multibyte string in half; the test output then holds
+    # bytes that are not UTF-8, and the outcome must still be recorded.
+    result = CommandRunner().run(
+        [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'ok \\x82 end'); sys.exit(3)"],
+        tmp_path, 30)
+    assert result.code == 3
+    assert result.output.startswith("ok ") and result.output.endswith(" end")

@@ -3,7 +3,6 @@
 import time
 from pathlib import Path
 
-import pytest
 
 from mutator import runner
 from mutator.runner import CommandResult, CommandRunner
@@ -73,8 +72,3 @@ def test_a_command_that_leaves_nothing_does_not_wait_out_the_grace(tmp_path, mon
     assert result.code == 0
     assert result.output == "quiet\n"
     assert time.monotonic() - started < 1.0
-
-
-def test_undecodable_output_still_raises(tmp_path):
-    with pytest.raises(UnicodeDecodeError):
-        CommandRunner().run("printf '\\377'", tmp_path, 30)
