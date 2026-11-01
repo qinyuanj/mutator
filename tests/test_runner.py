@@ -271,3 +271,13 @@ def test_a_worker_overlay_is_imported_ahead_of_the_environment(tmp_path):
     result = CommandRunner().run(command, worker, 5)
     assert result.code == 0
     assert result.output.strip() == "worker"
+
+
+def test_a_timeout_survives_a_process_group_that_cannot_be_signalled(tmp_path, monkeypatch):
+    def refuse(pid, sig):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr("mutator.runner.os.killpg", refuse)
+    result = CommandRunner().run(f"{sys.executable} -c 'import time; time.sleep(30)'", tmp_path, 0.5)
+    assert (result.code, result.timed_out) == (124, True)
+    assert result.seconds < 10

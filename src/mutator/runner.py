@@ -49,6 +49,15 @@ def _kill_group(process: subprocess.Popen, signum: int = signal.SIGKILL) -> bool
         os.killpg(process.pid, signum)
     except ProcessLookupError:
         return False
+    except PermissionError:
+        # macOS refuses killpg with EPERM once only zombies are left in the
+        # group. An unreaped leader still owns its pid, so signal it alone.
+        if signum and process.returncode is None:
+            try:
+                os.kill(process.pid, signum)
+            except (PermissionError, ProcessLookupError):
+                pass
+        return False
     return True
 
 
