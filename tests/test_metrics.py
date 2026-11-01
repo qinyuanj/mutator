@@ -263,3 +263,11 @@ def test_a_namespace_left_by_a_file_keeps_the_other_files_source(tmp_path):
     assert data["source"] == "b.go"
     assert [form["id"] for form in data["forms"]] == ["defn/Stop"]
 
+
+def test_a_replaced_snapshot_stays_world_readable(tmp_path):
+    write_results(tmp_path, "a.go", [_form("demo", "Run", "a.go", "hash-a")], {})
+    write_results(tmp_path, "a.go", [_form("demo", "Run", "a.go", "hash-b")], {})
+    path = snapshot_path(tmp_path, "demo")
+    assert "hash-b" in path.read_text(encoding="utf-8")
+    assert path.stat().st_mode & 0o777 == 0o644
+    assert sorted(item.name for item in path.parent.iterdir()) == ["demo.edn"]

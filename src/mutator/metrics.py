@@ -279,6 +279,8 @@ def _write_namespace(
         ) as stream:
             temporary = Path(stream.name)
             stream.write(text)
+        # NamedTemporaryFile creates 0600; a snapshot is as readable as before.
+        temporary.chmod(0o644)
         temporary.replace(path)
     finally:
         if temporary is not None:
