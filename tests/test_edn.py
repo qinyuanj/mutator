@@ -1,3 +1,5 @@
+import pytest
+
 from mutator.edn import dumps, keyword, loads
 
 
@@ -53,3 +55,26 @@ def test_atoms_cover_booleans_numbers_and_symbols():
     assert loads("-3") == -3
     assert loads("1.50") == 1.5
     assert loads("foo") == "foo"
+
+
+def test_dumps_renders_every_supported_value():
+    assert dumps(None) == "nil"
+    assert dumps(True) == "true"
+    assert dumps(False) == "false"
+    assert dumps(0) == "0"
+    assert dumps(-7) == "-7"
+    assert dumps(1.5) == "1.5"
+    assert dumps(2.0) == "2.0"
+    assert dumps(0.123456) == "0.1235"
+    assert dumps('a "b" \\c') == '"a \\"b\\" \\\\c"'
+    assert dumps(keyword("killed")) == ":killed"
+    assert dumps([]) == "[]"
+    assert dumps(()) == "[]"
+    assert dumps([1, ("x", 2), [True]]) == '[1 ["x" 2] [true]]'
+    assert dumps({}) == "{}"
+    assert dumps({"end-line": 9, "a b": 1, 3: None}) == '{:end-line 9 "a b" 1 3 nil}'
+
+
+def test_dumps_rejects_values_edn_cannot_hold():
+    with pytest.raises(TypeError, match="cannot render set as EDN"):
+        dumps({1})

@@ -31,32 +31,46 @@ def keyword(name: str) -> tuple:
     return ("keyword", name)
 
 
+def _float(value: float) -> str:
+    text = f"{value:.4f}".rstrip("0").rstrip(".")
+    if "." not in text:
+        text += ".0"
+    return text
+
+
+def _vector(value) -> str:
+    return "[" + " ".join(_render(item) for item in value) + "]"
+
+
+def _map_key(key) -> str:
+    if isinstance(key, str) and _keyword_key(key):
+        return f":{key}"
+    return _render(key)
+
+
+def _map(value: dict) -> str:
+    return "{" + " ".join(f"{_map_key(key)} {_render(item)}" for key, item in value.items()) + "}"
+
+
+# bool before int: True is an int.
+_RENDERERS = (
+    (bool, lambda value: "true" if value else "false"),
+    (int, str),
+    (float, _float),
+    (str, lambda value: f'"{_escape(value)}"'),
+    ((list, tuple), _vector),
+    (dict, _map),
+)
+
+
 def _render(value) -> str:
     if value is None:
         return "nil"
     if isinstance(value, tuple) and len(value) == 2 and value[0] == "keyword":
         return f":{value[1]}"
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, int) and not isinstance(value, bool):
-        return str(value)
-    if isinstance(value, float):
-        text = f"{value:.4f}".rstrip("0").rstrip(".")
-        if "." not in text:
-            text += ".0"
-        return text
-    if isinstance(value, str):
-        return f'"{_escape(value)}"'
-    if isinstance(value, (list, tuple)):
-        body = " ".join(_render(item) for item in value)
-        return f"[{body}]" if body else "[]"
-    if isinstance(value, dict):
-        parts = []
-        for key, item in value.items():
-            rendered_key = f":{key}" if isinstance(key, str) and _keyword_key(key) else _render(key)
-            parts.append(f"{rendered_key} {_render(item)}")
-        body = " ".join(parts)
-        return "{" + body + "}"
+    for kind, render in _RENDERERS:
+        if isinstance(value, kind):
+            return render(value)
     raise TypeError(f"cannot render {type(value).__name__} as EDN")
 
 
