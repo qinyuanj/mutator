@@ -1,3 +1,4 @@
+import dataclasses
 from pathlib import Path
 
 import pytest
@@ -229,3 +230,36 @@ def test_dropping_a_file_removes_its_namespace_when_nothing_else_remains(tmp_pat
     write_results(tmp_path, "a.go", [_form("demo", "Run", "a.go", "hash-a")], {})
     write_results(tmp_path, "a.go", [], {})
     assert not snapshot_path(tmp_path, "demo").exists()
+
+
+def test_forms_are_ordered_by_file_then_line(tmp_path):
+    late = dataclasses.replace(_form("demo", "alpha", "a.go", "h1"), line=9)
+    early = dataclasses.replace(_form("demo", "zeta", "a.go", "h2"), line=1)
+    write_results(tmp_path, "a.go", [late, early], {})
+    legacy = loads(snapshot_path(tmp_path, "demo").read_text(encoding="utf-8"))
+    legacy["forms"][0].pop("line")
+    snapshot_path(tmp_path, "demo").write_text(dumps(legacy) + "\n", encoding="utf-8")
+    write_results(tmp_path, "b.go", [dataclasses.replace(_form("demo", "beta", "b.go", "h3"), line=1)], {})
+    data = loads(snapshot_path(tmp_path, "demo").read_text(encoding="utf-8"))
+    assert [form["id"] for form in data["forms"]] == ["defn/zeta", "defn/alpha", "defn/beta"]
+
+
+def test_a_form_without_a_line_sorts_first(tmp_path):
+    write_results(tmp_path, "a.go", [dataclasses.replace(_form("demo", "b", "a.go", "h1"), line=1)], {})
+    legacy = loads(snapshot_path(tmp_path, "demo").read_text(encoding="utf-8"))
+    legacy["forms"][0].pop("line")
+    snapshot_path(tmp_path, "demo").write_text(dumps(legacy) + "\n", encoding="utf-8")
+    # Another file's run renders a form into a.go, next to the line-less one.
+    write_results(tmp_path, "c.go", [dataclasses.replace(_form("demo", "a", "a.go", "h2"), line=1)], {})
+    data = loads(snapshot_path(tmp_path, "demo").read_text(encoding="utf-8"))
+    assert [form["id"] for form in data["forms"]] == ["defn/b", "defn/a"]
+
+
+def test_a_namespace_left_by_a_file_keeps_the_other_files_source(tmp_path):
+    write_results(tmp_path, "a.go", [_form("demo", "Run", "a.go", "hash-a")], {})
+    write_results(tmp_path, "b.go", [_form("demo", "Stop", "b.go", "hash-b")], {})
+    write_results(tmp_path, "a.go", [_form("moved", "Run", "a.go", "hash-a")], {})
+    data = loads(snapshot_path(tmp_path, "demo").read_text(encoding="utf-8"))
+    assert data["source"] == "b.go"
+    assert [form["id"] for form in data["forms"]] == ["defn/Stop"]
+
