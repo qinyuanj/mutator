@@ -17,7 +17,14 @@ def _project(tmp_path: Path, *names: str) -> tuple[Path, list[Path]]:
 
 
 def _command(tmp_path: Path) -> str:
-    return f"echo run >> {shlex.quote(str(tmp_path / 'log'))}"
+    """Log each run and write the LCOV crapper requires a custom command to produce."""
+
+    record = r"SF:%s\nDA:1,1\nLF:1\nLH:1\nend_of_record\n"
+    return (
+        f"echo run >> {shlex.quote(str(tmp_path / 'log'))} && mkdir -p coverage && "
+        f"for f in $(find src lib -type f 2>/dev/null); do printf '{record}' \"$f\"; done"
+        " > coverage/lcov.info"
+    )
 
 
 def _runs(tmp_path: Path) -> int:
