@@ -15,9 +15,10 @@ def _sibling_src() -> Path:
     return project.parent / "crapper" / "src"
 
 
-# Added to crapper with --changed, --exclude and source-root scoping.
+# Added to crapper with --changed, --exclude, coverage reuse and source-root scoping.
 _NEEDS = {
     "discover": ("changed_files", "exclusion_error", "excluded", "without_excluded", "under_roots"),
+    "runners": ("stale_files",),
 }
 
 

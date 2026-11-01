@@ -452,7 +452,7 @@ def test_existing_coverage_is_not_regenerated(monkeypatch, tmp_path):
     _prepare_coverage(parse_args(["--no-coverage", "--root", str(root)]), root, [])
     _prepare_coverage(parse_args(["--use-existing-coverage", "--root", str(root)]), root, [])
     assert calls == []
-    _prepare_coverage(parse_args(["--root", str(root)]), root, [])
+    _prepare_coverage(parse_args(["--root", str(root)]), root, [root / "a.py"])
     assert len(calls) == 1
 
 

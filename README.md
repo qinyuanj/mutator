@@ -255,6 +255,8 @@ For other languages, coverage is generated with crapper's commands unless
 `--use-existing-coverage` or `--no-coverage` is set. A file missing from the report
 is treated as uncovered, and the run says so.
 
+Running crapper and then mutator does not run the coverage suite twice. Before it generates anything, mutator asks crapper which files' reports are still fresh, using `target/coverage/crapper-stamp.json`. A report counts as fresh when crapper's last coverage run of that language succeeded and covered the file, used the same `--coverage-command`, and nothing in the project has changed since (test files included). Fresh languages are reused, and the run prints `Reusing <languages> coverage from crapper's last run.` on stderr. Every other language is regenerated for all of its selected files, because one report covers a whole language. The baseline test run still always happens. `--use-existing-coverage` reads whatever is on disk without that check.
+
 ## WSL2
 
 Native Windows is not supported: mutator exits with status 1 and points at

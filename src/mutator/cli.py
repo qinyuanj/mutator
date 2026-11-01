@@ -51,8 +51,8 @@ Options:
                                 exists.
   --lines <n,n,...>             Run only mutations on these source lines.
   --no-coverage                 Treat every site as covered.
-  --use-existing-coverage       Read coverage already on disk. Same as
-                                --reuse-coverage.
+  --use-existing-coverage       Read coverage already on disk without
+                                checking it. Same as --reuse-coverage.
   --reuse-coverage              Read coverage already on disk. --select-specs
                                 recollects a missing or invalid Lua spec index.
   --coverage-command <cmd>      Run this command instead of the per-language
@@ -135,6 +135,12 @@ Coverage, when it is produced, uses the same commands as crapper:
   Lua          busted -c with luacov, then luacov -r lcov
 
 A site on a line the report does not mark as hit is uncovered and is not run.
+
+Before generating coverage, mutator reads target/coverage/crapper-stamp.json.
+A language whose reports crapper produced for these files, with the same
+--coverage-command, from the tree as it is now, is reused, and the run prints
+"Reusing <languages> coverage from crapper's last run." Only the other
+languages are regenerated. The baseline test run still happens.
 """
 
 
@@ -396,6 +402,20 @@ def select_files(options: Options) -> list[Path]:
     return sorted(set(_inside_root(kept, root)), key=lambda item: item.as_posix())
 
 
+def _languages(files: list[Path], crapper) -> set[str]:
+    return {crapper.discover.language_of(path) for path in files} - {None}
+
+
+def _stale(root: Path, files: list[Path], command: str | None, crapper) -> list[Path]:
+    """Files to regenerate. A language's report is rebuilt for all of its files or none."""
+
+    stale = _languages(crapper.runners.stale_files(root, files, command), crapper)
+    fresh = sorted(_languages(files, crapper) - stale)
+    if fresh:
+        print(f"Reusing {', '.join(fresh)} coverage from crapper's last run.", file=sys.stderr)
+    return [path for path in files if crapper.discover.language_of(path) in stale]
+
+
 def _prepare_coverage(options: Options, root: Path, files: list[Path]) -> dict:
     if options.no_coverage or options.scan:
         return {}
@@ -412,8 +432,10 @@ def _prepare_coverage(options: Options, root: Path, files: list[Path]) -> dict:
                 reuse=options.use_existing_coverage, verbose=options.verbose, source_files=targets,
             )
         remaining = [path for path in files if path.suffix != ".lua"]
-    if not options.use_existing_coverage and (remaining or not files):
-        crapper.runners.run_coverage(root, remaining, options.coverage_command)
+    if not options.use_existing_coverage and remaining:
+        stale = _stale(root, remaining, options.coverage_command, crapper)
+        if stale:
+            crapper.runners.run_coverage(root, stale, options.coverage_command)
     return indexes
 
 
