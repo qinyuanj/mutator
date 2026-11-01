@@ -594,7 +594,11 @@ def _worker_state(directory: Path, *, project=False) -> dict[str, tuple[str, byt
             key = path.relative_to(directory).as_posix()
             if _is_link(path):
                 state[key] = ("link", str(path.resolve()))
-                if project and path.is_dir():
+                # A link out of the project is an external input, like an
+                # installed library: its binding is frozen, its data is not.
+                # A link back into the project could bypass the private
+                # sources, so it stays rejected.
+                if project and path.is_dir() and path.resolve().is_relative_to(directory.resolve()):
                     raise WorkerBaselineError(f"Worker reuse cannot freeze linked project directory: {path}")
                 if project and path.is_file():
                     state[key + "/@contents"] = ("file", hashlib.sha256(path.read_bytes()).digest())

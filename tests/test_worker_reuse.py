@@ -248,3 +248,48 @@ def test_an_edited_bound_source_does_not_reach_other_files(tmp_path, prepared):
     assert outcomes == {"b.lua2": "survived", "b.lua3": "killed"}
     assert all(values[0] == b"return 1\n" for _, _, values in runner.calls[before:])
     assert sources[0].read_bytes() == b"return 9\n"
+
+
+def linked_project(tmp_path, target):
+    root = tmp_path / "project"
+    root.mkdir()
+    sources = fixture(root)
+    (root / "design").symlink_to(target(root), target_is_directory=True)
+    return root, sources
+
+
+def outside(tmp_path):
+    def target(root):
+        directory = tmp_path / "outside"
+        directory.mkdir()
+        (directory / "notes.md").write_text("design notes")
+        return directory
+    return target
+
+
+def test_link_to_a_directory_outside_the_project_is_an_external_input(tmp_path):
+    # Like an installed library, data outside the project is not frozen;
+    # the link itself is the project's input and stays bound.
+    root, sources = linked_project(tmp_path, outside(tmp_path))
+    with WorkerPool(root, sources) as pool:
+        assert run(root, sources[0], Runner(), pool) == {"a.lua2": "survived", "a.lua3": "killed"}
+        (tmp_path / "outside" / "notes.md").write_text("edited")
+        assert run(root, sources[1], Runner(), pool) == {"b.lua2": "survived", "b.lua3": "killed"}
+
+
+def test_retargeting_an_outside_link_is_a_project_input_change(tmp_path):
+    root, sources = linked_project(tmp_path, outside(tmp_path))
+    (tmp_path / "elsewhere").mkdir()
+    with WorkerPool(root, sources) as pool:
+        run(root, sources[0], Runner(), pool)
+        (root / "design").unlink()
+        (root / "design").symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+        with pytest.raises(WorkerBaselineError, match="Project inputs"):
+            run(root, sources[1], Runner(), pool)
+
+
+def test_link_to_a_directory_inside_the_project_is_still_rejected(tmp_path):
+    root, sources = linked_project(tmp_path, lambda root: root / "src")
+    with WorkerPool(root, sources) as pool:
+        with pytest.raises(WorkerBaselineError, match="cannot freeze linked"):
+            run(root, sources[0], Runner(), pool)
