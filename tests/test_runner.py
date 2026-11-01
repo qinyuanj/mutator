@@ -119,6 +119,11 @@ def test_python_commands(tmp_path):
     (project / "pyproject.toml").write_text("[project]\ndependencies=['pytest']\n", encoding="utf-8")
     assert _python_command(project)[-2:] == ["-m", "pytest"]
 
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "setup.cfg").write_text("[metadata]\nname = demo\n", encoding="utf-8")
+    assert _python_command(other)[-3:] == ["-m", "unittest", "discover"]
+
     conf = tmp_path / "conf"
     conf.mkdir()
     (conf / "conftest.py").write_text("", encoding="utf-8")
@@ -271,6 +276,45 @@ def test_a_worker_overlay_is_imported_ahead_of_the_environment(tmp_path):
     result = CommandRunner().run(command, worker, 5)
     assert result.code == 0
     assert result.output.strip() == "worker"
+
+
+def test_plans_fall_back_to_the_root_and_honor_an_override(tmp_path):
+    root = tmp_path.resolve()
+    source = root / "src" / "a.txt"
+    source.parent.mkdir()
+    source.write_text("x\n", encoding="utf-8")
+    assert plan_command(root, source, "java", None) == (["mvn", "-q", "test", "-DexcludeTags=no-mutate"], root)
+    assert plan_command(root, source, "typescript", None) == (["npm", "test"], root)
+    assert plan_command(root, source, "rust", None) == (["cargo", "test"], root)
+    assert plan_command(root, source, "go", None) == (["go", "test", "-count=1", "./src"], root)
+    assert plan_command(root, source, "clojure", None) == (["clj", "-M:test"], root)
+    assert plan_command(root, source, "python", None) == (_python_command(root), root)
+    assert plan_command(root, source, "cobol", None) == (["false"], root)
+    assert plan_command(root, source, "java", "make check") == ("make check", root)
+    (root / "go.mod").write_text("module demo\n", encoding="utf-8")
+    assert plan_command(root, root / "main.go", "go", None) == (["go", "test", "-count=1", "."], root)
+
+
+def test_plans_prefer_markers_in_a_fixed_order_over_nearness(tmp_path):
+    root = tmp_path.resolve()
+    sub = root / "sub"
+    sub.mkdir()
+    source = sub / "app.py"
+    source.write_text("x = 1\n", encoding="utf-8")
+    (sub / "setup.cfg").write_text("[metadata]\n", encoding="utf-8")
+    assert plan_command(root, source, "python", None)[1] == sub
+    (root / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    assert plan_command(root, source, "python", None)[1] == root
+    (sub / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    (root / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    assert plan_command(root, source, "python", None)[1] == root
+
+    clj = sub / "core.clj"
+    clj.write_text("(ns core)\n", encoding="utf-8")
+    (sub / "bb.edn").write_text("{}\n", encoding="utf-8")
+    assert plan_command(root, clj, "clojure", None) == (["bb", "test"], sub)
+    (root / "deps.edn").write_text("{}\n", encoding="utf-8")
+    assert plan_command(root, clj, "clojure", None) == (["clj", "-M:test"], root)
 
 
 def test_a_timeout_survives_a_process_group_that_cannot_be_signalled(tmp_path, monkeypatch):
