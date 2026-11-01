@@ -15,7 +15,6 @@ from pathlib import Path
 import pytest
 
 from mutator.cli import (
-    _changed_files,
     _is_source,
     _prepare_coverage,
     _take,
@@ -402,28 +401,14 @@ def test_help_and_conflicts_use_different_streams(capsys):
     assert captured.out == ""
 
 
-def test_git_status_keeps_short_names_renames_and_the_failure_text(monkeypatch, tmp_path, capsys):
-    class Result:
-        def __init__(self, code, out="", err=""):
-            self.returncode = code
-            self.stdout = out
-            self.stderr = err
-
-    def fail(*args, **kwargs):
-        return Result(1, err="boom\n")
-
-    monkeypatch.setattr("mutator.cli.subprocess.run", fail)
-    assert _changed_files(tmp_path) == []
-    assert capsys.readouterr().err.strip() == "boom"
-
-    def status(*args, **kwargs):
-        return Result(0, out="?? a\nR  src/old.py -> src/new.py\n")
-
-    monkeypatch.setattr("mutator.cli.subprocess.run", status)
-    found = _changed_files(tmp_path)
-    assert (tmp_path / "a").resolve() in found
-    assert (tmp_path / "src" / "new.py").resolve() in found
-    assert (tmp_path / "src" / "old.py").resolve() not in found
+def test_changed_outside_git_reports_the_failure_and_selects_nothing(tmp_path, capsys):
+    path = tmp_path / "src" / "demo.py"
+    path.parent.mkdir()
+    path.write_text("def place(x):\n    return x > 0\n", encoding="utf-8")
+    assert run(["--scan", "--no-coverage", "--changed", "--root", str(tmp_path)]) == 0
+    captured = capsys.readouterr()
+    assert captured.err.strip()
+    assert captured.out == "No source files to mutate.\n"
 
 
 def test_selection_joins_the_root_and_skips_unknown_files(tmp_path, capsys):

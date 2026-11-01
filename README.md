@@ -19,7 +19,8 @@ The first run of a tree executes every covered mutant. Start with the file you a
 ```bash
 ./mutator src/demo/core.clj          # one file, or a directory
 ./mutator --scan src/demo           # list sites, do not run tests
-./mutator --changed                 # git additions and edits
+./mutator --changed                 # git additions, edits, and untracked files
+./mutator --exclude src/gen --exclude '**/generated'   # leave these out
 ./mutator --mutate-all              # rerun killed mutants too
 ./mutator --no-coverage             # do not skip uncovered lines
 ./mutator --use-existing-coverage   # read reports already on disk
@@ -27,6 +28,12 @@ The first run of a tree executes every covered mutant. Start with the file you a
 ./mutator --max-workers 3 src/demo/core.clj
 ./mutator --paranoid-workers        # pristine-check every worker, not once per command
 ```
+
+`--changed` asks git (through crapper) for added, modified, and untracked files under the project root, including files inside a new untracked directory, and keeps the source files among them. The project root may be a subdirectory of the repository. Deleted files are left out, names with spaces or non-ASCII characters work, and so does a repository with no commits yet.
+
+`-s`/`--source-root` (repeatable, relative to the project root) walks those trees instead of the project root. Combined with `--changed` or with path arguments, it narrows that selection instead: only files under at least one source root are kept, compared after resolving symlinks. A file you name that is outside every root is dropped with `Skipping <path>; it is outside the source roots` on stderr; files found by `--changed` or by walking a named directory are dropped silently. So `./mutator -s src src/a.py` mutates only `src/a.py`. Text filters and `--exclude` apply afterwards, as they do to every selection. These are crapper's rules.
+
+`--exclude` takes a path or glob relative to the project root and may be repeated. It applies to every selection: the default walk, `--source-root`, named files and directories, `--changed`, and `--scan`. A named file that is excluded is dropped with `Skipping excluded <path>` on stderr. Either `/` or `\` separates directories; a leading `./` and a trailing `/` are ignored. `*` and `?` match within one directory name, `**` matches any number of whole directories (including none), and a match on a directory excludes everything in it. Matching is case-sensitive. An absolute pattern or one containing `..` is a usage error (exit `1`). These are crapper's rules, which are the ones uml-viewer uses for `standardTools.exclude`.
 
 Once a snapshot exists, the next run is differential. It reruns survivors and every site in a function whose text changed. Killed mutants in an unchanged function stay killed. `--since-last-run` is that same selection. `--mutate-all` ignores it.
 

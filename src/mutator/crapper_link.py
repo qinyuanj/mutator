@@ -15,6 +15,21 @@ def _sibling_src() -> Path:
     return project.parent / "crapper" / "src"
 
 
+# Added to crapper with --changed, --exclude and source-root scoping.
+_NEEDS = {
+    "discover": ("changed_files", "exclusion_error", "excluded", "without_excluded", "under_roots"),
+}
+
+
+def _missing(crapper) -> list[str]:
+    return [
+        f"crapper.{module}.{name}"
+        for module, names in _NEEDS.items()
+        for name in names
+        if not hasattr(getattr(crapper, module), name)
+    ]
+
+
 def ensure_crapper():
     try:
         import crapper
@@ -33,4 +48,10 @@ def ensure_crapper():
     import crapper.languages.treesitter
     import crapper.runners
 
+    missing = _missing(crapper)
+    if missing:
+        raise ImportError(
+            f"crapper at {Path(crapper.__file__).parent} is too old for mutator: "
+            f"it has no {', '.join(missing)}. Update that checkout."
+        )
     return crapper

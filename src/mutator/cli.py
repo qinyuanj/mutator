@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import signal
-import subprocess
 import sys
 import threading
 from dataclasses import dataclass, field
@@ -34,9 +33,15 @@ Options:
   --root <path>                 Project root. Metrics are written here.
                                 Default: the current directory.
   -s, --source-root <path>      Walk this tree instead of the project root.
-                                May be repeated.
-  --changed                     Mutate added and modified source files from
-                                git status.
+                                May be repeated. Path arguments and --changed
+                                are narrowed to the files under a source root.
+  --changed                     Mutate added, modified, and untracked source
+                                files from git status, including files in a
+                                new directory. Paths are taken under --root,
+                                which may be a subdirectory of the repository.
+                                With --source-root, only those under a root.
+  --exclude <glob>              Leave out this project-relative path or glob.
+                                May be repeated. Applies to every selection.
   --scan                        List mutation sites. Do not run tests or
                                 write metrics.
   --mutate-all                  Run every covered site, including ones the
@@ -82,12 +87,21 @@ Options:
                                 site's run decision.
 
 Arguments:
-  path              File or directory to mutate. Test paths are skipped.
+  path              File or directory to mutate. Test paths are skipped. With
+                    --source-root, a named file outside every root is dropped:
+                    "Skipping <path>; it is outside the source roots" on stderr.
   filter            When the argument is not a path, only source files whose
                     path contains this text are mutated.
 
 With no paths, source files under the project root are mutated. Directories
 named test, tests, spec, specs, vendor, node_modules, and target are skipped.
+
+--exclude patterns are anchored at the project root and use either separator.
+`*` and `?` match within one directory name, `**` matches any number of whole
+directories, and a match on a directory excludes everything in it. A leading
+./ and a trailing / are ignored; matching is case-sensitive. An absolute
+pattern or one containing .. is a usage error. A named file that is excluded
+is dropped with "Skipping excluded <path>" on stderr.
 
 The default, once a snapshot exists, reruns survivors and sites in functions
 whose text changed. Killed mutants in unchanged functions are kept.
@@ -131,6 +145,7 @@ class Options:
     exit_code: int = 0
     project_root: Path = field(default_factory=lambda: Path("."))
     source_roots: list[str] = field(default_factory=list)
+    excludes: list[str] = field(default_factory=list)
     positionals: list[str] = field(default_factory=list)
     scan: bool = False
     mutate_all: bool = False
@@ -194,6 +209,7 @@ def _timeout(value: str) -> float:
 _VALUES = {
     "-s": ("source_roots", str),
     "--source-root": ("source_roots", str),
+    "--exclude": ("excludes", str),
     "--root": ("project_root", Path),
     "--coverage-command": ("coverage_command", str),
     "--test-command": ("test_command", str),
@@ -232,7 +248,7 @@ _CONFLICTS = (
 
 def _set_value(options: Options, arg: str, value: str) -> None:
     name, convert = _VALUES[arg]
-    if name == "source_roots":
+    if name in ("source_roots", "excludes"):
         getattr(options, name).append(convert(value))
     else:
         setattr(options, name, convert(value))
@@ -254,11 +270,19 @@ def _consume(options: Options, args: list[str], index: int) -> int:
     return index + 1
 
 
+def _exclusion_error(patterns: list[str]) -> str | None:
+    try:
+        check = ensure_crapper().discover.exclusion_error
+    except ImportError:
+        return None  # run() reports the missing crapper
+    return next((error for error in map(check, patterns) if error), None)
+
+
 def _conflict(options: Options) -> str | None:
     for first, second, message in _CONFLICTS:
         if getattr(options, first) and getattr(options, second):
             return message
-    return None
+    return _exclusion_error(options.excludes)
 
 
 def _usage(message: str) -> Options:
@@ -282,29 +306,6 @@ def parse_args(argv: list[str] | None = None) -> Options:
     return options
 
 
-def _changed_files(root: Path) -> list[Path]:
-    result = subprocess.run(
-        ["git", "status", "--porcelain"],
-        cwd=root,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        print(result.stderr.strip() or "git status failed", file=sys.stderr)
-        return []
-    found: list[Path] = []
-    for line in result.stdout.splitlines():
-        if len(line) < 4:
-            continue
-        path_text = line[3:].strip()
-        if " -> " in path_text:
-            path_text = path_text.split(" -> ", 1)[1]
-        path_text = path_text.strip('"')
-        found.append((root / path_text).resolve())
-    return found
-
-
 def _positionals(root: Path, args: list[str]) -> tuple[list[Path], list[str]]:
     existing: list[Path] = []
     filters: list[str] = []
@@ -319,28 +320,37 @@ def _positionals(root: Path, args: list[str]) -> tuple[list[Path], list[str]]:
     return existing, filters
 
 
-def _changed_sources(root: Path, crapper) -> list[Path]:
-    files = []
-    for path in _changed_files(root):
-        if crapper.discover.language_of(path) is None:
-            continue
-        if crapper.discover.is_test_file(path):
-            continue
-        files.append(path)
-    return files
-
-
 def _is_source(path: Path, crapper) -> bool:
     if crapper.discover.language_of(path) is None:
         return False
     return not crapper.discover.is_test_file(path)
 
 
-def _explicit_sources(existing: list[Path], crapper) -> list[Path]:
+def _changed_sources(root: Path, crapper) -> list[Path]:
+    return [path for path in crapper.discover.changed_files(root) if _is_source(path, crapper)]
+
+
+def _in_scope(files: list[Path], roots: list[Path], crapper) -> list[Path]:
+    """Source roots narrow every other selection to the files under them."""
+
+    return crapper.discover.under_roots(files, roots) if roots else files
+
+
+def _shown(path: Path, root: Path) -> str:
+    return path.relative_to(root).as_posix() if path.is_relative_to(root) else path.as_posix()
+
+
+def _explicit_sources(existing: list[Path], root: Path, excludes: list[str], roots: list[Path], crapper) -> list[Path]:
     files = []
     for path in existing:
         if path.is_dir():
-            files.extend(crapper.discover.iter_source_files([path]))
+            files.extend(_in_scope(crapper.discover.iter_source_files([path]), roots, crapper))
+            continue
+        if not _in_scope([path], roots, crapper):
+            print(f"Skipping {_shown(path, root)}; it is outside the source roots", file=sys.stderr)
+            continue
+        if crapper.discover.excluded(path, root, excludes):
+            print(f"Skipping excluded {path.relative_to(root).as_posix()}", file=sys.stderr)
             continue
         if _is_source(path, crapper):
             files.append(path)
@@ -351,13 +361,12 @@ def _explicit_sources(existing: list[Path], crapper) -> list[Path]:
 
 
 def _choose_files(options: Options, root: Path, existing: list[Path], crapper) -> list[Path]:
+    roots = [(root / path).resolve() for path in options.source_roots]
     if options.changed:
-        return _changed_sources(root, crapper)
-    if options.source_roots:
-        return crapper.discover.iter_source_files([(root / path).resolve() for path in options.source_roots])
+        return _in_scope(_changed_sources(root, crapper), roots, crapper)
     if existing:
-        return _explicit_sources(existing, crapper)
-    return crapper.discover.iter_source_files([root])
+        return _explicit_sources(existing, root, options.excludes, roots, crapper)
+    return crapper.discover.iter_source_files(roots or [root])
 
 
 def _matching(files: list[Path], filters: list[str]) -> list[Path]:
@@ -382,8 +391,9 @@ def select_files(options: Options) -> list[Path]:
     crapper = ensure_crapper()
     root = options.project_root.resolve()
     existing, filters = _positionals(root, options.positionals)
-    files = _choose_files(options, root, existing, crapper)
-    return sorted(set(_inside_root(_matching(files, filters), root)), key=lambda item: item.as_posix())
+    files = _matching(_choose_files(options, root, existing, crapper), filters)
+    kept = crapper.discover.without_excluded(files, root, options.excludes)
+    return sorted(set(_inside_root(kept, root)), key=lambda item: item.as_posix())
 
 
 def _prepare_coverage(options: Options, root: Path, files: list[Path]) -> dict:
