@@ -188,7 +188,7 @@ def _clojure_skipped(node, data: bytes) -> bool:
 
 
 def _clojure_text(node, data: bytes) -> str:
-    if node.child_count == 0 or node.type in {"sym_lit", "bool_lit", "num_lit"}:
+    if node.type in {"sym_lit", "bool_lit", "num_lit"}:
         return _text(data, node)
     return ""
 
@@ -207,7 +207,7 @@ def _clojure_node(node, data: bytes, found: list[RawSite]) -> None:
         mutant, category = _CLOJURE_HEAD[text]
         _add(found, node, text, mutant, category)
         return
-    if node.type == "bool_lit" and text in _BOOLEANS:
+    if node.type == "bool_lit":
         _add(found, node, text, _BOOLEANS[text], "boolean")
         return
     if node.type == "num_lit" and text in {"0", "1"}:
@@ -229,30 +229,40 @@ def _python_annotation(node) -> bool:
     return False
 
 
+def _binary_site(node, token: str, language: str) -> str | None:
+    mutant = _binary_mutant(language, token)
+    # Python spells union annotations with the same binary AST as `a | b`.
+    if language == "python" and token in _BITWISE_BINARY and _python_annotation(node):
+        return None
+    return mutant
+
+
+def _operator(node, token: str, parent: str, language: str, found: list[RawSite]) -> None:
+    if parent in _BINARY_PARENTS:
+        mutant = _binary_site(node, token, language)
+        if mutant is not None:
+            _add(found, node, token, mutant, _category(token))
+    if token in {"!", "not"} and parent in _UNARY_PARENTS | {"comparison_operator"}:
+        _add(found, node, token, "", "unary")
+    if token == "-" and parent in _UNARY_PARENTS:
+        _add(found, node, token, "", "unary")
+
+
+def _literal(node, token: str, found: list[RawSite]) -> None:
+    if node.type in {"true", "false"} and token in _BOOLEANS:
+        _add(found, node, token, _BOOLEANS[token], "boolean")
+    if node.type in _NUMBERS and token in {"0", "1"}:
+        _add(found, node, token, _flip01(token), "constant")
+
+
 def _visit(node, data: bytes, language: str, found: list[RawSite]) -> None:
-    parent = node.parent.type if node.parent is not None else ""
     if node.child_count == 0:
         token = _text(data, node)
+        parent = node.parent.type if node.parent is not None else ""
         # A literal sits inside the same expression as an operator, so these
         # checks are independent. `0` is a child of `a > 0`, not an operator.
-        if parent in _BINARY_PARENTS:
-            mutant = _binary_mutant(language, token)
-            # Python spells union annotations with the same binary AST as `a | b`.
-            if language == "python" and token in _BITWISE_BINARY and _python_annotation(node):
-                mutant = None
-            if mutant is not None:
-                _add(found, node, token, mutant, _category(token))
-        if token in {"!", "not"} and parent in _UNARY_PARENTS | {"comparison_operator"}:
-            _add(found, node, token, "", "unary")
-        if token == "-" and parent in _UNARY_PARENTS:
-            _add(found, node, token, "", "unary")
-        if node.type in {"true", "false"} and token in _BOOLEANS:
-            _add(found, node, token, _BOOLEANS[token], "boolean")
-        if node.type in _NUMBERS and token in {"0", "1"}:
-            _add(found, node, token, "1" if token == "0" else "0", "constant")
-    elif node.type == "bool_lit" and _text(data, node) in _BOOLEANS:
-        text = _text(data, node)
-        _add(found, node, text, _BOOLEANS[text], "boolean")
+        _operator(node, token, parent, language, found)
+        _literal(node, token, found)
     for child in node.children:
         _visit(child, data, language, found)
 

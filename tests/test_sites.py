@@ -43,6 +43,9 @@ def test_clojure_ignores_strings_comments_and_quotes(tmp_path):
 (defn place []
   (comment (+ 1 0))
   (quote (+ 1 0))
+  '(+ 1 0)
+  `(+ 1 0)
+  ; (+ 1 0)
   (str "true + 1"))
 """
     sites = _sites(tmp_path, "src/demo/core.clj", source)
