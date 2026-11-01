@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from mutator.engine import StaleBackupsError, mutate_file, restore_backups
+from mutator.engine import StaleBackupsError, mutate_file, restore_backups, scan_file
 from mutator.edn import loads
 from mutator.metrics import snapshot_path
 from mutator.runner import CommandResult
@@ -465,3 +465,32 @@ def test_an_exception_keeps_a_source_edited_during_the_run(tmp_path, capsys):
         run_editing(tmp_path, runner)
     assert path.read_text(encoding="utf-8") == EDITED
     assert "src/demo.py changed during the mutation run" in capsys.readouterr().err
+
+
+def test_a_scan_marks_functions_changed_since_the_snapshot(tmp_path):
+    path = tmp_path / "src" / "demo.py"
+    path.parent.mkdir()
+    path.write_text(SOURCE + "\n\ndef keep(x):\n    return x > 1\n", encoding="utf-8")
+    first = scan_file(path, tmp_path, covered_lines=None, ignore_coverage=True, lines=None)
+    assert not any(line.startswith("*") for line in first.splitlines())
+    mutate_file(
+        path,
+        tmp_path,
+        runner=FakeRunner(),
+        covered_lines=None,
+        ignore_coverage=True,
+        mutate_all=True,
+        lines=None,
+        test_command="fake",
+        timeout_factor=10,
+        mutation_warning=50,
+        baselines={},
+    )
+    edited = SOURCE.replace("a > 0", "a > 1") + "\n\ndef keep(x):\n    return x > 1\n"
+    path.write_text(edited + "\n\ndef new(x):\n    return x > 2\n", encoding="utf-8")
+    scanned = scan_file(path, tmp_path, covered_lines=None, ignore_coverage=True, lines=None)
+    rows = [line for line in scanned.splitlines() if line.endswith("]")]
+    assert {line[0] for line in rows if "[defn/add]" in line} == {"*"}
+    assert {line[0] for line in rows if "[defn/keep]" in line} == {" "}
+    assert {line[0] for line in rows if "[defn/new]" in line} == {"*"}
+    assert "* marks a function whose text changed" in scanned

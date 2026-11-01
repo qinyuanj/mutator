@@ -43,16 +43,6 @@ def restore_backups(root: Path) -> None:
         )
 
 
-def _drop_bytecode(path: Path) -> None:
-    """A same-second .pyc would hide the mutant from Python."""
-
-    cache = path.parent / "__pycache__"
-    if not cache.is_dir():
-        return
-    for item in cache.glob(path.stem + ".*.pyc"):
-        item.unlink(missing_ok=True)
-
-
 def _covered(site: Site, lines: set[int] | None, ignore_coverage: bool) -> bool:
     if ignore_coverage:
         return True
@@ -677,11 +667,13 @@ def scan_file(
         covered = {site.mutation_id: site.line in covered_lines for site in found}
     history = load_history(root, file_key)
     digests = form_digests(source, path, root)
-    changed = set()
-    if history.forms:
-        changed = {
-            key
-            for key, digest in digests.items()
-            if key not in history.forms or history.forms[key].digest != digest
-        }
-    return format_scan(file_key, found, changed, covered)
+    return format_scan(file_key, found, _changed(history, digests), covered)
+
+
+def _changed(history, digests: dict[tuple[str, str], str]) -> set[tuple[str, str]]:
+    """Functions that are new or rewritten since the snapshot. None without one."""
+
+    if not history.forms:
+        return set()
+    prior = {key: form.digest for key, form in history.forms.items()}
+    return {key for key, digest in digests.items() if prior.get(key) != digest}

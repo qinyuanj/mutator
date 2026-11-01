@@ -29,7 +29,6 @@ from mutator.edn import loads
 from mutator.engine import (
     _carry_forward,
     _covered,
-    _drop_bytecode,
     _forms,
     mutate_file,
     scan_file,
@@ -571,18 +570,6 @@ def test_a_run_whose_source_is_edited_exits_4_and_keeps_the_edit(tmp_path, capsy
     assert source.read_text(encoding="utf-8") == edited
     assert not (tmp_path / ".metrics").exists()
     assert "src/demo.py changed during the mutation run" in capsys.readouterr().err
-
-
-def test_bytecode_is_dropped(tmp_path):
-    path = tmp_path / "src" / "demo.py"
-    path.parent.mkdir()
-    path.write_bytes(b"one")
-    cache = path.parent / "__pycache__"
-    cache.mkdir()
-    compiled = cache / f"{path.stem}.cpython-314.pyc"
-    compiled.write_bytes(b"pyc")
-    _drop_bytecode(path)
-    assert not compiled.exists()
 
 
 def test_selection_coverage_and_timeouts_keep_their_boundaries(tmp_path, capsys, monkeypatch):
