@@ -29,10 +29,10 @@ def digest(source: str, start: int, end: int) -> str:
 def _header(source: str, start: int, end: int) -> str:
     text = _slice(source, start, min(end, start + 6)).lstrip()
     while text.startswith("#["):
-        close = text.find("]")
-        if close < 0:
+        _attribute, closed, rest = text.partition("]")
+        if not closed:
             break
-        text = text[close + 1 :].lstrip()
+        text = rest.lstrip()
     return text
 
 

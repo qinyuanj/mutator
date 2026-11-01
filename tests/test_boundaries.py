@@ -194,6 +194,9 @@ def test_privacy_headers_digests_owners_and_mutation_fields(tmp_path):
     assert is_private("python", "__x", "def __x():\n    return 1\n", 1, 2) is True
     assert is_private("rust", "place", "fn place() {}\n", 1, 1) is True
     assert is_private("rust", "place", "#[inline]\npub fn place() {}\n", 1, 2) is False
+    assert is_private("rust", "place", "#[inline] #[must_use]\npub fn place() {}\n", 1, 2) is False
+    # An unclosed attribute leaves the header as it is.
+    assert is_private("java", "place", "#[open\nprivate void place() {}\n", 1, 2) is True
     assert is_private("typescript", "#place", "#place() {}\n", 1, 1) is True
     assert is_private("typescript", "place", "private place() {}\n", 1, 1) is True
     assert is_private("typescript", "place", "function place() {}\n", 1, 1) is False
