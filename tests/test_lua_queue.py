@@ -54,6 +54,7 @@ class Runner:
         self.b_started = Event()
         self.b_published = Event()
         self.corrupt = False
+        self.fail = False
 
     def run(self, command, cwd, timeout):
         held = mutated(cwd)
@@ -68,6 +69,8 @@ class Runner:
             overlapped = self.b_published.wait(timeout=5)
             with self.lock:
                 self.events.append(("slow-done", overlapped))
+        if self.fail and name == "b.lua":
+            raise OSError("runner broke")
         if self.corrupt and name == "b.lua":
             (cwd / "src" / "a.lua").write_bytes(b"broken\n")
         return CommandResult(17 if text == b"return 3\n" else 0, False, .01, "")
@@ -122,11 +125,11 @@ def test_pristine_checks_precede_mutants_once_per_command(tmp_path, paranoid, ex
 def test_worker_failure_publishes_only_completed_files(tmp_path):
     sources = fixture(tmp_path)
     runner = Runner()
-    runner.corrupt = True
+    runner.fail = True
     done = []
     files = [queued(sources[0], [2]), queued(sources[1], [2, 3])]
     with WorkerPool(tmp_path, sources, check_each_worker=False) as pool:
-        with pytest.raises(WorkerBaselineError):
+        with pytest.raises(OSError, match="runner broke"):
             run_queue(pool, files, 1, runner, lambda item: done.append(item.file_key))
         assert pool.failed
     assert done == ["a.lua"]
@@ -194,7 +197,7 @@ def test_engine_baseline_failure_does_not_block_other_files(tmp_path, monkeypatc
     assert published == [("src/b.lua", {"b.lua2": "survived", "b.lua3": "killed"})]
 
 
-def test_engine_worker_failure_keeps_completed_snapshots(tmp_path, monkeypatch):
+def test_engine_a_mutant_that_corrupts_another_source_affects_no_later_mutant(tmp_path, monkeypatch):
     engine, sources, published = engine_fixture(tmp_path, monkeypatch)
     monkeypatch.setattr(engine, "sites_in_file", lambda source, path, root, key: [
         site(path, 2)] if path.name == "a.lua" else [site(path, 2), site(path, 3)])
@@ -202,9 +205,9 @@ def test_engine_worker_failure_keeps_completed_snapshots(tmp_path, monkeypatch):
     runner.corrupt = True
     with WorkerPool(tmp_path, sources, check_each_worker=False) as pool:
         results = mutate(engine, tmp_path, sources, runner, pool, max_workers=1)
-    assert not results[0].baseline_failed
-    assert results[1].baseline_failed and "restoration" in results[1].baseline_message
-    assert published == [("src/a.lua", {"a.lua2": "survived"})]
+    assert not any(result.baseline_failed for result in results)
+    assert published == [("src/a.lua", {"a.lua2": "survived"}),
+                         ("src/b.lua", {"b.lua2": "survived", "b.lua3": "killed"})]
     assert all(source.read_bytes() == b"return 1\n" for source in sources)
     assert not (tmp_path / "target" / "mutator-backup").exists()
 

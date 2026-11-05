@@ -1,6 +1,4 @@
 import os
-import shutil
-import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
@@ -10,7 +8,7 @@ from mutator.engine import StaleBackupsError, mutate_file, restore_backups, scan
 from mutator.edn import loads
 from mutator.metrics import snapshot_path
 from mutator.runner import CommandResult
-from mutator.workers import create_workers, delete_tree, new_run_dir, worker_count
+from mutator.workers import worker_count
 
 
 class FakeRunner:
@@ -252,90 +250,6 @@ def test_worker_count_follows_sites_cores_and_the_requested_cap():
     assert worker_count(10, None) == min(10, cores)
     assert worker_count(10, 3) == min(3, cores)
     assert worker_count(2, 8) == min(2, cores)
-
-
-def test_workers_keep_a_private_copy_and_link_the_rest(tmp_path):
-    source = tmp_path / "src" / "demo.py"
-    source.parent.mkdir()
-    source.write_text("def place(x):\n    return x > 0\n", encoding="utf-8")
-    sibling = tmp_path / "src" / "other.py"
-    sibling.write_text("kept = True\n", encoding="utf-8")
-    marker = tmp_path / "tests" / "keep.txt"
-    marker.parent.mkdir()
-    marker.write_text("keep", encoding="utf-8")
-    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
-    original = source.read_bytes()
-
-    base = new_run_dir(tmp_path)
-    try:
-        workers = create_workers(base, tmp_path, "src/demo.py", original, 2)
-        assert len(workers) == 2
-        for worker in workers:
-            private = worker / "src" / "demo.py"
-            assert private.is_file()
-            assert not private.is_symlink()
-            assert private.read_bytes() == original
-            assert (worker / "src" / "other.py").is_symlink()
-            assert (worker / "tests").is_symlink()
-            assert (worker / "tests" / "keep.txt").read_text(encoding="utf-8") == "keep"
-            assert (worker / "pyproject.toml").is_file()
-            assert not (worker / "pyproject.toml").is_symlink()
-        (workers[0] / "src" / "demo.py").write_text("changed\n", encoding="utf-8")
-        assert workers[1].joinpath("src/demo.py").read_bytes() == original
-        assert source.read_bytes() == original
-    finally:
-        delete_tree(base)
-
-    assert source.read_bytes() == original
-    assert sibling.read_text(encoding="utf-8") == "kept = True\n"
-    assert marker.read_text(encoding="utf-8") == "keep"
-    assert not base.exists()
-
-
-def test_node_imports_the_worker_copy_through_a_relative_specifier(tmp_path):
-    source = tmp_path / "src" / "find.mjs"
-    source.parent.mkdir()
-    source.write_text('export const value = "real"\n', encoding="utf-8")
-    beside = tmp_path / "src" / "find.test.mjs"
-    beside.write_text('import { value } from "./find.mjs";\nconsole.log(value)\n', encoding="utf-8")
-    (tmp_path / "src" / "notes.mjs").write_text("export const notes = 1\n", encoding="utf-8")
-    main = tmp_path / "src" / "main.mjs"
-    main.write_text('import { value } from "./find.mjs";\nexport const main = value\n', encoding="utf-8")
-    (tmp_path / "src" / "app.test.mjs").write_text('import { main } from "./main.mjs";\n', encoding="utf-8")
-    distant = tmp_path / "tests" / "use.mjs"
-    distant.parent.mkdir()
-    distant.write_text('import { value } from "../src/find.mjs";\nconsole.log(value)\n', encoding="utf-8")
-    (tmp_path / "tests" / "other.test.mjs").write_text("export const n = 1\n", encoding="utf-8")
-
-    base = new_run_dir(tmp_path)
-    try:
-        worker = create_workers(base, tmp_path, "src/find.mjs", source.read_bytes(), 1)[0]
-        private = worker / "src" / "find.mjs"
-        private.write_text('export const value = "worker"\n', encoding="utf-8")
-        for relative in ("src/find.test.mjs", "src/main.mjs", "src/app.test.mjs", "tests/use.mjs"):
-            copied = worker / relative
-            assert copied.is_file()
-            assert not copied.is_symlink()
-        assert (worker / "src" / "notes.mjs").is_symlink()
-        assert not (worker / "tests").is_symlink()
-        assert (worker / "tests" / "other.test.mjs").is_symlink()
-        if shutil.which("node"):
-            for script in ("src/find.test.mjs", "tests/use.mjs"):
-                completed = subprocess.run(
-                    ["node", script],
-                    cwd=worker,
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                )
-                assert completed.returncode == 0
-                assert completed.stdout.strip() == "worker"
-    finally:
-        delete_tree(base)
-
-    assert beside.read_text(encoding="utf-8").startswith("import")
-    assert distant.read_text(encoding="utf-8").startswith("import")
-    assert source.read_text(encoding="utf-8") == 'export const value = "real"\n'
 
 
 def test_a_mutation_run_leaves_the_project_tree_unchanged(tmp_path):

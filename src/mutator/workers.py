@@ -1,15 +1,18 @@
-"""Run mutants in symlink overlays, the way clj-mutate runs its workers.
+"""Run mutants in overlay views.
 
-Each worker is a directory under target/mutation-workers. Project files are
-linked in. Sources under test are private copies, so workers can mutate them
-without touching the original tree. A Lua run can retain a fixed overlay across
-files after validating restoration; Rust runs in worker slots whose paths and
-Cargo targets persist across files and runs; other callers use per-file
-overlays.
+Each worker is an empty directory under target/mutation-workers with a fixed
+base layer beside it. Every command runs in a fresh overlay view mounted at
+the worker: the base layer and the project tree below, an empty writable
+layer on top. The source under test is written into the view, and the view is
+discarded afterwards, so nothing a test writes reaches the project or the next
+mutant. A Lua run keeps its workers across files; Rust runs in worker slots
+whose paths and Cargo targets persist across files and runs; other callers use
+per-file workers. (docs/adr/0006-mutants-run-in-overlay-views.md)
 """
 
 from __future__ import annotations
 
+import atexit
 import fcntl
 import hashlib
 import os
@@ -18,10 +21,12 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import tomllib
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from queue import Empty, Queue
@@ -29,14 +34,15 @@ from threading import Event, Lock
 
 from mutator.model import Site
 from mutator.runner import SLOT_PREFIX, Command, run_tests
+from mutator.sandbox import make_opaque, mount_overlay, unmount
 from mutator.sites import apply_site
 from mutator.timings import measure, record
 
-# Build output and the worker tree itself must not be shared. A link to
-# ``target`` would point a worker at the directory that contains the worker.
-# Rust workers get their own build output instead: a slot target
+# Build output and the worker tree itself are hidden in a view. ``target``
+# would show a worker the directory that contains the worker. Rust workers get
+# their own build output instead: a slot target
 # (docs/adr/0004-rust-worker-slots-keep-cargo-target.md).
-SKIP_LINK = frozenset(
+HIDDEN = frozenset(
     {
         ".git",
         ".hg",
@@ -58,34 +64,6 @@ SKIP_LINK = frozenset(
         ".uml-viewer",
         ".toolcache",
     }
-)
-
-CONFIGS = (
-    "deps.edn",
-    "bb.edn",
-    "pom.xml",
-    "build.gradle",
-    "build.gradle.kts",
-    "settings.gradle",
-    "go.mod",
-    "go.sum",
-    "package.json",
-    "package-lock.json",
-    "pnpm-lock.yaml",
-    "yarn.lock",
-    "tsconfig.json",
-    "Cargo.toml",
-    "Cargo.lock",
-    "pyproject.toml",
-    "pytest.ini",
-    "setup.cfg",
-    "setup.py",
-    "conftest.py",
-    "requirements.txt",
-    "Pipfile",
-    "poetry.lock",
-    ".busted",
-    ".luacov",
 )
 
 
@@ -114,18 +92,14 @@ def discard_overlays() -> None:
     Worker slots lose their overlay and keep their slot target.
     """
 
+    for worker in list(_mounted):
+        unmount(worker)
+        _mounted.discard(worker)
     for directory in list(_created_runs):
-        delete_tree(directory)
+        _delete_run(directory)
         _created_runs.discard(directory)
     for slot in list(_held_slots):
-        delete_tree(slot / "worker")
-
-
-def symlink(link: Path, target: Path) -> None:
-    link.parent.mkdir(parents=True, exist_ok=True)
-    if link.is_symlink() or link.exists():
-        link.unlink()
-    link.symlink_to(target.resolve(), target_is_directory=target.is_dir())
+        _remove_worker(slot / "worker")
 
 
 def _is_link(path: Path) -> bool:
@@ -133,7 +107,11 @@ def _is_link(path: Path) -> bool:
 
 
 def delete_tree(path: Path) -> None:
-    """Remove worker data, unlinking links without visiting their targets."""
+    """Remove worker data, unlinking links without visiting their targets.
+
+    A mounted view is detached first; deleting through it would only fill its
+    writable layer.
+    """
 
     try:
         linked = _is_link(path)
@@ -143,6 +121,11 @@ def delete_tree(path: Path) -> None:
         path.unlink()
         return
     if path.is_dir():
+        if os.path.ismount(path):
+            unmount(path)
+        if not os.access(path, os.R_OK | os.W_OK | os.X_OK):
+            # overlayfs leaves its work directory without permissions.
+            os.chmod(path, 0o700)
         for child in list(path.iterdir()):
             delete_tree(child)
         path.rmdir()
@@ -150,203 +133,108 @@ def delete_tree(path: Path) -> None:
     path.unlink()
 
 
-def _copy_mtime(copy: Path, source: Path) -> None:
-    """A copy as old as its source, so Cargo does not see a change."""
-
-    status = source.stat()
-    os.utime(copy, ns=(status.st_atime_ns, status.st_mtime_ns))
+_scratch: Path | None = None
 
 
-def _copy_configs(worker: Path, root: Path, relative: str) -> None:
-    for name in CONFIGS:
-        source = root / name
-        if not source.is_file():
-            continue
-        if name == relative:
-            continue
-        (worker / name).write_bytes(source.read_bytes())
-        _copy_mtime(worker / name, source)
+def _layers(worker: Path) -> tuple[Path, Path, Path]:
+    """The worker's base layer, and the writable and work layers of its view.
 
-
-def _link_children(worker_dir: Path, real_dir: Path, skip: set[str]) -> None:
-    if not real_dir.is_dir():
-        return
-    for child in real_dir.iterdir():
-        if child.name in skip or child.name in SKIP_LINK:
-            continue
-        destination = worker_dir / child.name
-        if destination.exists() or destination.is_symlink():
-            continue
-        symlink(destination, child)
-
-
-# Node, and Vite in front of it, resolve a relative import from the real path
-# of the module. A symlinked test therefore loads the original source.
-_SPECIFIER = re.compile(
-    r"""(?:from|import|require)\s*\(?\s*['"](\.[^'"]+)['"]""",
-)
-_EXTENSIONS = (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs")
-
-
-def _specifiers(text: str) -> list[str]:
-    found = []
-    for match in _SPECIFIER.finditer(text):
-        specifier = match.group(1).split("?", 1)[0].split("#", 1)[0]
-        if specifier.startswith("."):
-            found.append(specifier)
-    return found
-
-
-def _stem(base: Path) -> Path:
-    if base.suffix in _EXTENSIONS:
-        return Path(str(base)[: -len(base.suffix)])
-    return base
-
-
-def _candidates(directory: Path, specifier: str) -> list[Path]:
-    base = directory / specifier
-    stem = _stem(base)
-    names = [base]
-    for ext in _EXTENSIONS:
-        names.append(Path(str(stem) + ext))
-    for ext in _EXTENSIONS:
-        names.append(stem / f"index{ext}")
-    return names
-
-
-def _inside(root: Path, path: Path) -> Path | None:
-    try:
-        relative = path.resolve().relative_to(root.resolve())
-    except ValueError:
-        return None
-    return root / relative
-
-
-def _imported_files(importer: Path, root: Path) -> set[Path]:
-    try:
-        text = importer.read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
-        return set()
-    found = set()
-    for specifier in _specifiers(text):
-        for candidate in _candidates(importer.parent, specifier):
-            local = _inside(root, candidate)
-            if local is not None and local.is_file():
-                found.add(local.resolve())
-    return found
-
-
-def _keep_dir(name: str) -> bool:
-    return name not in SKIP_LINK and name != "node_modules"
-
-
-def _source_files(root: Path):
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [
-            name for name in dirnames
-            if _keep_dir(name) and not _is_link(Path(dirpath) / name)
-        ]
-        for name in filenames:
-            source = Path(dirpath) / name
-            if source.suffix in _EXTENSIONS and not _is_link(source):
-                yield source
-
-
-def importers_of(root: Path, relative: str) -> set[str]:
-    """Modules that reach ``relative`` through a relative import.
-
-    Those modules have to be real files in the worker. A symlink would send
-    Node back to the original tree.
+    They live outside the project: overlayfs refuses a layer inside another
+    layer, and the project is the lowest one.
     """
 
-    target = (root / relative).resolve()
-    reverse: dict[Path, set[Path]] = {}
-    for source in _source_files(root):
-        for imported in _imported_files(source, root):
-            reverse.setdefault(imported, set()).add(source.resolve())
-    found: set[Path] = set()
-    pending = [target]
-    while pending:
-        current = pending.pop()
-        for importer in reverse.get(current, ()):
-            if importer in found or importer == target:
-                continue
-            found.add(importer)
-            pending.append(importer)
-    root_resolved = root.resolve()
-    return {path.relative_to(root_resolved).as_posix() for path in found}
+    global _scratch
+    if _scratch is None:
+        _scratch = Path(tempfile.mkdtemp(prefix="mutator-layers-"))
+        atexit.register(delete_tree, _scratch)
+    home = _scratch / hashlib.sha256(str(worker.absolute()).encode()).hexdigest()[:16]
+    return home / "base", home / "upper", home / "work"
 
 
-def _expand_directory(link: Path, real_dir: Path) -> None:
-    """Replace a linked directory so a copied module is not written through it."""
-
-    if not real_dir.is_dir():
-        return
-    link.unlink()
-    link.mkdir()
-    for child in real_dir.iterdir():
-        if child.name in SKIP_LINK:
-            continue
-        symlink(link / child.name, child)
+def _delete_run(directory: Path) -> None:
+    for worker in directory.glob("worker-*"):
+        _remove_worker(worker)
+    delete_tree(directory)
 
 
-def _copy_importer(worker: Path, root: Path, relative: str, data: bytes | None = None) -> None:
-    real = root
-    current = worker
-    for segment in relative.split("/")[:-1]:
-        real = real / segment
-        current = current / segment
-        if current.is_symlink():
-            _expand_directory(current, real)
-        elif not current.exists():
-            current.mkdir(parents=True)
-    destination = worker / relative
-    if destination.is_symlink():
-        destination.unlink()
-    elif destination.exists():
-        if data is not None and destination.read_bytes() != data:
-            destination.write_bytes(data)
-        return
-    destination.write_bytes((root / relative).read_bytes() if data is None else data)
+def _remove_worker(worker: Path) -> None:
+    delete_tree(worker)
+    delete_tree(_layers(worker)[0].parent)
 
 
-def _overlay(worker: Path, root: Path, relative: str, original: bytes) -> None:
-    """Real directories along the source path. Every sibling is a link."""
+def _build_base(worker: Path, root: Path, relatives, sources: dict[str, bytes]) -> None:
+    """The worker's fixed layer: ``sources`` over the project, build output hidden.
 
-    segments = tuple(relative.split("/"))
-    for index, _segment in enumerate(segments[:-1]):
-        rel_dir = Path(*segments[: index + 1])
-        _link_children(worker / rel_dir, root / rel_dir, {segments[index + 1]})
-    destination = worker.joinpath(*segments)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_bytes(original)
-    source = root / relative
-    if source.is_file() and source.read_bytes() == original:
-        _copy_mtime(destination, source)
+    Hidden directories are those at the project root and beside every
+    directory on the path to a source under test.
+    """
+
+    _remove_worker(worker)
+    worker.mkdir(parents=True)
+    base = _layers(worker)[0]
+    base.mkdir(parents=True)
+    folders = {Path(name).parent for name in [*relatives, *sources]}
+    folders |= {parent for folder in list(folders) for parent in folder.parents}
+    for folder in folders:
+        for name in HIDDEN:
+            real = root / folder / name
+            if real.exists() or real.is_symlink():
+                hidden = base / folder / name
+                hidden.mkdir(parents=True, exist_ok=True)
+                make_opaque(hidden)
+    for name, data in sources.items():
+        (base / name).parent.mkdir(parents=True, exist_ok=True)
+        (base / name).write_bytes(data)
 
 
-def _build_worker(worker: Path, root: Path, relative: str, original: bytes, importers) -> None:
-    worker.mkdir(parents=True, exist_ok=True)
-    _copy_configs(worker, root, relative)
-    _link_children(worker, root, {relative.split("/", 1)[0]})
-    _overlay(worker, root, relative, original)
-    for importer in importers:
-        _copy_importer(worker, root, importer)
+# Views mounted now, so an interrupt can detach them.
+_mounted: set[Path] = set()
+
+
+@contextmanager
+def _view(worker: Path, root: Path, relative: str, data: bytes):
+    """A fresh view at ``worker`` holding ``data`` at ``relative``.
+
+    The source is stamped with the current time even when it is the
+    original: a slot target may hold a newer build of a mutant
+    (docs/adr/0004).
+    """
+
+    base, upper, work = _layers(worker)
+    for layer in (upper, work):
+        delete_tree(layer)
+        layer.mkdir()
+    mount_overlay(worker, [base, root.resolve()], upper, work)
+    _mounted.add(worker)
+    try:
+        _write_fresh(worker / relative, data)
+        yield
+    finally:
+        unmount(worker)
+        _mounted.discard(worker)
+        delete_tree(upper)
+        delete_tree(work)
+
+
+def _run_in_view(directory, root, relative, data, runner, command, cwd, timeout):
+    with _view(directory, root, relative, data):
+        return run_tests(runner, command, mapped_cwd(directory, root, cwd), timeout)
 
 
 def create_workers(
     base: Path, root: Path, relative: str, original: bytes, count: int,
-    *, start: int = 0,
+    *, start: int = 0, sources: dict[str, bytes] | None = None,
 ) -> list[Path]:
+    """Workers ``base/worker-<n>`` for ``relative``; ``sources`` go in their base layer."""
+
     created = []
-    importers = importers_of(root, relative)
     try:
         for index in range(start, start + count):
             worker = base / f"worker-{index}"
-            _build_worker(worker, root, relative, original, importers)
+            _build_base(worker, root, [relative], sources or {})
             created.append(worker)
     except BaseException:
-        delete_tree(base)
+        _delete_run(base)
         raise
     return created
 
@@ -385,7 +273,6 @@ def _execute(
     file_key: str,
     plans: dict[str, tuple[Command, float]] | None = None,
     phase: str = "mutant",
-    validate=None,
 ) -> str:
     if plans is not None:
         command, timeout = plans.get(site.mutation_id, (command, timeout))
@@ -396,36 +283,17 @@ def _execute(
             file=sys.stderr,
         )
         return "survived"
-    destination = directory / relative
-    if validate is not None:
-        validate(directory)
     mutated = apply_site(original.decode("utf-8"), site.start, site.end, site.mutant)
-    _write_fresh(destination, mutated.encode("utf-8"))
-    try:
-        result = run_tests(runner, command, mapped_cwd(directory, root, cwd), timeout)
-        record(phase, getattr(result, "seconds", 0.0))
-        if runner.verbose:
-            print(
-                f"result {phase} {file_key}:{site.line} {site.description}: "
-                f"{getattr(result, 'seconds', 0.0):.3f}s, "
-                f"exit={result.code}, timed_out={result.timed_out}",
-                file=sys.stderr,
-            )
-    finally:
-        if validate is not None:
-            try:
-                replaced = any(
-                    _is_link(path) for path in (destination, *destination.parents)
-                    if path == directory or directory in path.parents
-                )
-            except FileNotFoundError as error:
-                raise WorkerBaselineError(
-                    f"Worker source binding removed in {directory}") from error
-            if replaced:
-                raise WorkerBaselineError(f"Worker source binding replaced in {directory}")
-        _write_fresh(destination, original)
-    if validate is not None:
-        validate(directory)
+    result = _run_in_view(directory, root, relative, mutated.encode("utf-8"),
+                          runner, command, cwd, timeout)
+    record(phase, getattr(result, "seconds", 0.0))
+    if runner.verbose:
+        print(
+            f"result {phase} {file_key}:{site.line} {site.description}: "
+            f"{getattr(result, 'seconds', 0.0):.3f}s, "
+            f"exit={result.code}, timed_out={result.timed_out}",
+            file=sys.stderr,
+        )
     if result.launch_error is not None:
         raise result.launch_error
     if result.timed_out or result.code != 0:
@@ -449,7 +317,6 @@ def _drain(
     plans: dict[str, tuple[Command, float]] | None,
     checked_command: Command,
     first_site: Site | None = None,
-    validate=None,
     shared_checks: set | None = None,
 ) -> None:
     checked = {tuple(checked_command) if isinstance(checked_command, list) else checked_command}
@@ -466,24 +333,18 @@ def _drain(
             key = tuple(selected_command) if isinstance(selected_command, list) else selected_command
             if key not in checked:
                 if shared_checks is None:
-                    if validate is not None:
-                        validate(directory)
-                    _check_worker(directory, root, cwd, runner, selected_command, selected_timeout)
-                    if validate is not None:
-                        validate(directory)
+                    _check_worker(directory, root, relative, original, cwd, runner,
+                                  selected_command, selected_timeout)
                 else:
-                    # One pristine run per command across the run; the other
-                    # workers' structural state is compared by validate().
+                    # One pristine run per command across the run; every
+                    # other worker's view is built the same way.
                     with lock:
                         first = key not in shared_checks
                         if first:
                             shared_checks.add(key)
                     if first:
-                        if validate is not None:
-                            validate(directory)
-                        _check_worker(directory, root, cwd, runner, selected_command, selected_timeout)
-                        if validate is not None:
-                            validate(directory)
+                        _check_worker(directory, root, relative, original, cwd, runner,
+                                      selected_command, selected_timeout)
                 checked.add(key)
         if runner.verbose:
             with lock:
@@ -500,7 +361,6 @@ def _drain(
             timeout,
             file_key,
             plans,
-            validate=validate,
         )
         with lock:
             outcomes[site.mutation_id] = status
@@ -525,7 +385,6 @@ def _run_all(
     plans: dict[str, tuple[Command, float]] | None,
     checked_command: Command,
     reserved: list[Site] | None = None,
-    validate=None,
     shared_checks: set | None = None,
 ) -> None:
     pending: Queue = Queue()
@@ -552,7 +411,6 @@ def _run_all(
                 plans.get(reserved[index].mutation_id, (command, timeout))[0]
                 if reserved is not None and plans is not None else checked_command,
                 reserved[index] if reserved is not None else None,
-                validate,
                 shared_checks,
             )
             for index, directory in enumerate(directories)
@@ -565,9 +423,9 @@ class WorkerBaselineError(RuntimeError):
     """An unmutated overlay cannot execute the project's test command."""
 
 
-def _check_worker(directory, root, cwd, runner, command, timeout) -> None:
+def _check_worker(directory, root, relative, original, cwd, runner, command, timeout) -> None:
     with measure("worker-check"):
-        result = run_tests(runner, command, mapped_cwd(directory, root, cwd), timeout)
+        result = _run_in_view(directory, root, relative, original, runner, command, cwd, timeout)
     if result.launch_error is not None:
         raise result.launch_error
     if result.timed_out or result.code != 0:
@@ -583,24 +441,24 @@ def _check_worker(directory, root, cwd, runner, command, timeout) -> None:
         )
 
 
-def _worker_state(directory: Path, *, project=False) -> dict[str, tuple[str, bytes | str]]:
-    """Fingerprint private data and link bindings without following directory links."""
+def _project_state(root: Path) -> dict[str, tuple[str, bytes | str]]:
+    """Fingerprint the project's data and link bindings without following directory links."""
     state = {}
 
     def visit(folder):
         for path in folder.iterdir():
-            if project and (path.name in SKIP_LINK or path.name in {"node_modules", ".claude", ".agents"}):
+            if path.name in HIDDEN or path.name in {"node_modules", ".claude", ".agents"}:
                 continue
-            key = path.relative_to(directory).as_posix()
+            key = path.relative_to(root).as_posix()
             if _is_link(path):
                 state[key] = ("link", str(path.resolve()))
                 # A link out of the project is an external input, like an
                 # installed library: its binding is frozen, its data is not.
-                # A link back into the project could bypass the private
-                # sources, so it stays rejected.
-                if project and path.is_dir() and path.resolve().is_relative_to(directory.resolve()):
+                # A link back into the project leads a view to the real tree,
+                # past the private sources, so it stays rejected.
+                if path.is_dir() and path.resolve().is_relative_to(root.resolve()):
                     raise WorkerBaselineError(f"Worker reuse cannot freeze linked project directory: {path}")
-                if project and path.is_file():
+                if path.is_file():
                     state[key + "/@contents"] = ("file", hashlib.sha256(path.read_bytes()).digest())
             elif path.is_dir():
                 state[key] = ("directory", "")
@@ -608,16 +466,17 @@ def _worker_state(directory: Path, *, project=False) -> dict[str, tuple[str, byt
             else:
                 state[key] = ("file", hashlib.sha256(path.read_bytes()).digest())
 
-    visit(directory)
+    visit(root)
     return state
 
 
 class WorkerPool:
-    """Run-scoped Lua overlays with a fixed set of private source bindings.
+    """Run-scoped Lua workers with a fixed set of private source bindings.
 
-    Layout never changes after the first baseline. Any unexpected private data
-    change poisons the pool; callers must discard it rather than trust a kill.
-    Commands are still checked separately on every worker and working directory.
+    Every worker's base layer holds the bytes each source had when the pool
+    was made. A change to the real tree's other inputs poisons the pool;
+    callers must discard it rather than trust a kill. Commands are still
+    checked separately on every working directory.
     """
 
     def __init__(self, root: Path, sources: list[Path], check_each_worker: bool = True):
@@ -626,15 +485,14 @@ class WorkerPool:
             path.resolve().relative_to(self.root).as_posix(): path.read_bytes()
             for path in sources
         }
-        # False: one pristine command run per run, not per worker. The other
-        # workers' overlays are still compared structurally by validate().
+        # False: one pristine command run per run, not per worker. Every
+        # worker's view is built from the same layers.
         self.check_each_worker = check_each_worker
-        self.base = None
-        self.directories = []
-        self.states = {}
-        self.checked = set()
-        self.failed = False
+        self.base: Path | None = None
+        self.directories: list[Path] = []
         self.project_state = None
+        self.failed = False
+        self.checked: set = set()
 
     def __enter__(self):
         return self
@@ -644,7 +502,7 @@ class WorkerPool:
 
     def close(self):
         if self.base is not None:
-            delete_tree(self.base)
+            _delete_run(self.base)
         self.failed = True
 
     def prepare(self, relative, original, count):
@@ -654,33 +512,16 @@ class WorkerPool:
             self.base = new_run_dir(self.root)
             try:
                 self.project_state = self._project_state()
-                self.directories = create_workers(
-                    self.base, self.root, relative, original, count)
-                for directory in self.directories:
-                    self._bind(directory)
             except BaseException:
                 self.close()
                 raise
         self.validate()
         if len(self.directories) < count:
-            added = create_workers(
+            self.directories.extend(create_workers(
                 self.base, self.root, relative, original,
-                count - len(self.directories), start=len(self.directories))
-            for directory in added:
-                self._bind(directory)
-            self.directories.extend(added)
+                count - len(self.directories), start=len(self.directories),
+                sources=self.sources))
         return self.directories[:count]
-
-    def _bind(self, directory):
-        """Give the worker the bound bytes, not what the real tree holds now."""
-        for name, data in self.sources.items():
-            _copy_importer(directory, self.root, name, data)
-        self.states[directory] = _worker_state(directory)
-
-    def validate_directory(self, directory):
-        if _worker_state(directory) != self.states[directory]:
-            self.failed = True
-            raise WorkerBaselineError(f"Worker restoration failed in {directory}")
 
     def _project_state(self):
         """The real tree's fingerprint, without the bound sources.
@@ -689,35 +530,28 @@ class WorkerPool:
         tree cannot reach another file's mutants. The engine checks each
         source itself before publishing it.
         """
-        state = _worker_state(self.root, project=True)
+        state = _project_state(self.root)
         for name in self.sources:
             state.pop(name, None)
             state.pop(name + "/@contents", None)
         return state
 
-    def validate_project(self):
+    def validate(self):
         """The real tree only. Safe while workers hold mutants of other files."""
         if self._project_state() != self.project_state:
             self.failed = True
             raise WorkerBaselineError("Project inputs changed during worker reuse")
 
-    def validate(self):
-        self.validate_project()
-        for directory in self.directories:
-            self.validate_directory(directory)
-
-    def check(self, directory, root, cwd, runner, command, timeout):
-        _check_once(self.checked, directory, root, cwd, runner, command, timeout)
+    def check(self, directory, root, relative, original, cwd, runner, command, timeout):
+        _check_once(self.checked, directory, root, relative, original, cwd, runner, command, timeout)
 
 
-def _check_once(checked: set, directory, root, cwd, runner, command, timeout) -> None:
-    mapped = mapped_cwd(directory, root, cwd)
-    if not mapped.is_relative_to(directory.resolve()):
-        raise WorkerBaselineError(f"Worker working directory escapes overlay: {cwd}")
-    key = (directory, str(mapped),
+def _check_once(checked: set, directory, root, relative, original, cwd, runner, command, timeout) -> None:
+    # Every pristine view is the same whichever bound file it writes.
+    key = (directory, str(cwd),
            ("shell", command) if isinstance(command, str) else ("argv", *command))
     if key not in checked:
-        _check_worker(directory, root, cwd, runner, command, timeout)
+        _check_worker(directory, root, relative, original, cwd, runner, command, timeout)
         checked.add(key)
 
 
@@ -796,15 +630,14 @@ def _invalidate(root: Path, target: Path, relative: str) -> None:
 
 
 class WorkerSlots:
-    """Rust worker slots: fixed overlays whose Cargo targets persist.
+    """Rust worker slots: fixed worker paths whose Cargo targets persist.
 
-    Slot n is ``target/mutation-workers/cargo-slot-<n>``: ``worker`` is the
-    overlay, rebuilt from the project tree for every file at the same path;
-    ``target`` is the slot target that every command in the slot builds into;
-    ``lock`` is held for the run, so a concurrent mutator takes another
-    number; ``mutated`` names the sources whose package may hold a mutant
-    build. Each overlay is compared structurally around every mutant. A
-    failure discards the overlays; the next file rebuilds them.
+    Slot n is ``target/mutation-workers/cargo-slot-<n>``: ``worker`` is where
+    every view of the slot is mounted, at the same path for every file;
+    ``worker.base`` is its base layer, rebuilt for every file; ``target`` is
+    the slot target that every command in the slot builds into; ``lock`` is
+    held for the run, so a concurrent mutator takes another number;
+    ``mutated`` names the sources whose package may hold a mutant build.
     (docs/adr/0004-rust-worker-slots-keep-cargo-target.md)
     """
 
@@ -813,7 +646,6 @@ class WorkerSlots:
         self.check_each_worker = check_each_worker
         self.slots: list[Path] = []
         self.locks: list[int] = []
-        self.states: dict[Path, dict] = {}
         self.checked: set = set()
 
     def __enter__(self):
@@ -845,13 +677,11 @@ class WorkerSlots:
     def prepare(self, relative, original, count):
         while len(self.slots) < count:
             self._acquire()
-        importers = importers_of(self.root, relative)
         directories = []
         try:
             for index, slot in enumerate(self.slots):
                 worker = slot / "worker"
-                delete_tree(worker)
-                self.states.pop(worker, None)
+                _remove_worker(worker)
                 if index >= count:
                     continue
                 _seed(self.root, slot / "target")
@@ -861,31 +691,24 @@ class WorkerSlots:
                         _invalidate(self.root, slot / "target", previous)
                 # Written before any mutant, so an interrupted run is undone too.
                 marker.write_text(relative + "\n", encoding="utf-8")
-                _build_worker(worker, self.root, relative, original, importers)
-                self.states[worker] = _worker_state(worker)
+                _build_base(worker, self.root, [relative], {})
                 directories.append(worker)
         except BaseException:
             self.close()
             raise
         return directories
 
-    def validate_directory(self, directory):
-        if _worker_state(directory) != self.states.get(directory):
-            raise WorkerBaselineError(f"Worker restoration failed in {directory}")
-
     def validate(self):
-        for directory in self.states:
-            self.validate_directory(directory)
+        """Nothing to compare: every command runs in a fresh view."""
 
-    def check(self, directory, root, cwd, runner, command, timeout):
-        _check_once(self.checked, directory, root, cwd, runner, command, timeout)
+    def check(self, directory, root, relative, original, cwd, runner, command, timeout):
+        _check_once(self.checked, directory, root, relative, original, cwd, runner, command, timeout)
 
     def close(self):
-        """Remove the overlays. Slot targets and locks stay."""
+        """Remove the workers. Slot targets and locks stay."""
 
         for slot in self.slots:
-            delete_tree(slot / "worker")
-        self.states.clear()
+            _remove_worker(slot / "worker")
 
     def release(self):
         self.close()
@@ -939,9 +762,9 @@ def run_mutants(
              timeout if check_timeout is None else check_timeout)
             for _directory in directories
         ]
-        # Validate pristine overlays before any mutation can earn a kill. With
-        # a shared worker pool, one run per distinct command is enough: the
-        # pool compares every other worker's structure before and after use.
+        # Check pristine views before any mutation can earn a kill. With a
+        # shared worker pool, one run per distinct command is enough: every
+        # worker's view is built from the same layers.
         with ThreadPoolExecutor(max_workers=len(directories)) as executor:
             checks = []
             seen = set()
@@ -954,7 +777,7 @@ def run_mutants(
                 checks.append(
                     executor.submit(
                         _check_worker if pool is None else pool.check,
-                        directory, root, cwd, runner, *first_plan)
+                        directory, root, relative, original, cwd, runner, *first_plan)
                 )
             for check in checks:
                 check.result()
@@ -976,7 +799,6 @@ def run_mutants(
             plans,
             command if check_command is None else check_command,
             reserved,
-            pool.validate_directory if pool is not None else None,
             shared_checks=set()
             if pool is not None and not pool.check_each_worker else None,
         )
@@ -989,17 +811,13 @@ def run_mutants(
             ]
             if survivors:
                 directory = directories[0]
-                if pool is not None:
-                    pool.validate_directory(directory)
-                _check_worker(directory, root, cwd, runner, full_command, full_timeout)
-                if pool is not None:
-                    pool.validate_directory(directory)
+                _check_worker(directory, root, relative, original, cwd, runner,
+                              full_command, full_timeout)
                 for site in survivors:
                     completed[site.mutation_id] = _execute(
                         directory, site, root, relative, original, runner,
                         full_command, cwd, full_timeout, file_key,
                         phase="survivor-confirmation",
-                        validate=pool.validate_directory if pool is not None else None,
                     )
         if pool is not None:
             pool.validate()
@@ -1010,7 +828,7 @@ def run_mutants(
         raise
     finally:
         if base is not None:
-            delete_tree(base)
+            _delete_run(base)
 
 
 @dataclass
@@ -1053,7 +871,8 @@ def _check_queue(pool: WorkerPool, directories: list[Path], files: list[QueuedFi
 
     def check(directory: Path) -> None:
         for item in planned[directory]:
-            pool.check(directory, pool.root, item.cwd, runner, item.check_command, item.check_timeout)
+            pool.check(directory, pool.root, item.relative, item.original, item.cwd, runner,
+                       item.check_command, item.check_timeout)
 
     with ThreadPoolExecutor(max_workers=len(planned)) as executor:
         for future in [executor.submit(check, directory) for directory in planned]:
@@ -1066,9 +885,8 @@ def run_queue(pool: WorkerPool, files: list[QueuedFile], max_workers: int | None
     A worker that finishes a mutant takes the next one from any file, so one
     file's slowest mutant no longer idles the rest. ``on_done(item)`` runs one
     call at a time as soon as that file's last mutant is restored and the real
-    tree is validated; after any failure no further file completes. Each
-    worker validates its own overlay around every mutant; the pool-wide
-    validate() runs only while every worker is pristine.
+    tree is validated; after any failure no further file completes. Every
+    mutant runs in a fresh view, so a worker carries nothing to the next one.
     """
 
     files = [item for item in files if item.sites]
@@ -1104,7 +922,6 @@ def run_queue(pool: WorkerPool, files: list[QueuedFile], max_workers: int | None
                     status = _execute(
                         directory, site, pool.root, item.relative, item.original, runner,
                         item.command, item.cwd, item.timeout, item.file_key,
-                        validate=pool.validate_directory,
                     )
                     with lock:
                         item.completed[site.mutation_id] = status
@@ -1114,7 +931,7 @@ def run_queue(pool: WorkerPool, files: list[QueuedFile], max_workers: int | None
                         with publishing:
                             if stop.is_set():
                                 return
-                            pool.validate_project()
+                            pool.validate()
                             on_done(item)
             except BaseException:
                 stop.set()

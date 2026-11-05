@@ -5,7 +5,8 @@ import os
 import sys
 
 from mutator.runner import CommandRunner
-from mutator.workers import WorkerSlots, _is_link, discard_overlays
+from mutator.model import Site
+from mutator.workers import WorkerSlots, discard_overlays, run_mutants
 
 
 def project(root):
@@ -28,20 +29,29 @@ def test_two_concurrent_runs_get_different_slot_numbers(tmp_path):
         assert later.prepare("src/a.rs", a.read_bytes(), 1)[0].parent.name == "cargo-slot-0"
 
 
-def test_the_next_file_replaces_the_previous_private_copy_with_a_link(tmp_path):
+def test_the_next_file_sees_the_project_copy_of_the_previous_file(tmp_path):
     a, b = project(tmp_path)
+    seen = tmp_path / "seen"
+    script = ("import sys; from pathlib import Path; "
+              "open(sys.argv[1], 'ab').write(Path('src/a.rs').read_bytes()); "
+              "raise SystemExit(Path('src/b.rs').read_bytes() != Path('src/a.rs').read_bytes())")
+    command = [sys.executable, "-c", script, str(seen)]
+    mutant = Site("src/a.rs", "f", "fn/f", "f", 2, 24, 25, "1", "2", "number", "two")
     with WorkerSlots(tmp_path) as slots:
         first = slots.prepare("src/a.rs", a.read_bytes(), 2)
-        for worker in first:
-            assert not _is_link(worker / "src" / "a.rs")
-            (worker / "src" / "a.rs").write_bytes(b"left behind\n")
+        outcomes = {}
+        run_mutants(tmp_path, a, a.read_bytes(), [mutant], 1, CommandRunner(), command,
+                    tmp_path, 5, "src/a.rs", outcomes, pool=slots)
+        assert outcomes == {"two": "killed"}
         second = slots.prepare("src/b.rs", b.read_bytes(), 1)
         assert second == first[:1]
-        assert _is_link(second[0] / "src" / "a.rs")
-        assert not _is_link(second[0] / "src" / "b.rs")
-        # An unused slot does not keep the previous file's overlay either.
+        # An unused slot does not keep the previous file's worker either.
         assert not first[1].exists()
-        slots.validate()
+        seen.write_bytes(b"")
+        mutant_b = Site("src/b.rs", "f", "fn/f", "f", 2, 24, 25, "1", "2", "number", "b2")
+        run_mutants(tmp_path, b, b.read_bytes(), [mutant_b], 1, CommandRunner(), command,
+                    tmp_path, 5, "src/b.rs", outcomes, pool=slots)
+    assert set(seen.read_bytes().split(b"pub fn")) == {b"", b" f() -> i64 {\n    1\n}\n"}
     assert a.read_bytes() == b.read_bytes() == b"pub fn f() -> i64 {\n    1\n}\n"
 
 
@@ -92,7 +102,7 @@ def test_commands_in_a_slot_build_into_its_slot_target(tmp_path, monkeypatch):
                "('CARGO_TARGET_DIR', 'CARGO_BUILD_BUILD_DIR')]))"]
     with WorkerSlots(tmp_path) as slots:
         [worker] = slots.prepare("src/a.rs", a.read_bytes(), 1)
-        result = CommandRunner().run(command, worker / "src", 5)
+        result = CommandRunner().run(command, worker, 5)
     target = str(worker.parent / "target")
     assert json.loads(result.output) == [target, target]
     assert json.loads(CommandRunner().run(command, tmp_path, 5).output) == [None, None]

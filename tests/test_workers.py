@@ -6,9 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from mutator.workers import (
-    create_workers, delete_tree, importers_of, new_run_dir, run_mutants, symlink, worker_count,
-)
+from mutator.workers import create_workers, run_mutants, worker_count
 from mutator.model import Site
 from mutator.runner import CommandRunner
 
@@ -22,29 +20,38 @@ def project(root):
     return root / "src" / "value.py"
 
 
-def test_worker_links_untouched_files_and_copies_the_source(tmp_path):
+def test_a_view_shows_the_project_and_hides_build_output(tmp_path):
     source = project(tmp_path)
-    base = tmp_path / "target" / "mutation-workers" / "run-test"
-    worker, = create_workers(base, tmp_path, "src/value.py", source.read_bytes(), 1)
-    try:
-        assert (worker / "assets").is_symlink()
-        assert (worker / "src" / "value.py").is_symlink() is False
-        (worker / "src" / "value.py").write_bytes(b"value = 2\n")
-        assert source.read_bytes() == b"value = 1\n"
-        assert (tmp_path / "assets" / "data.txt").read_text() == "original"
-    finally:
-        delete_tree(base)
-    assert source.read_bytes() == b"value = 1\n"
+    (tmp_path / "build").mkdir()
+    (tmp_path / "build" / "stale.txt").write_text("stale")
+    script = """
+from pathlib import Path
+from src.value import value
+assert Path("assets/data.txt").read_text() == "original"
+assert not list(Path("build").iterdir())
+assert not list(Path("target").iterdir())
+Path("assets/data.txt").write_text("changed")
+raise SystemExit(0 if value == 1 else 3)
+"""
+    site = Site("src/value.py", "value", "defn/value", "value", 1,
+                8, 9, "1", "2", "number", "two")
+    outcomes = {}
+    run_mutants(tmp_path, source, source.read_bytes(), [site], 1, CommandRunner(),
+                [sys.executable, "-c", script], tmp_path, 5, "src/value.py", outcomes)
+    assert outcomes == {"two": "killed"}
+    assert (tmp_path / "assets" / "data.txt").read_text() == "original"
+    assert (tmp_path / "build" / "stale.txt").read_text() == "stale"
 
 
-def test_link_failures_are_visible_and_cleaned(monkeypatch, tmp_path):
+def test_base_layer_failures_are_visible_and_cleaned(monkeypatch, tmp_path):
     source = project(tmp_path)
-    error = OSError("link failure")
+    (tmp_path / "build").mkdir()
+    error = OSError("xattr failure")
 
     def fail(*args, **kwargs):
         raise error
 
-    monkeypatch.setattr(Path, "symlink_to", fail)
+    monkeypatch.setattr("mutator.workers.make_opaque", fail)
     base = tmp_path / "workers"
     with pytest.raises(OSError) as raised:
         create_workers(base, tmp_path, "src/value.py", source.read_bytes(), 2)
@@ -172,78 +179,3 @@ def _write(path, text):
 
 def test_at_least_one_worker_runs():
     assert worker_count(0, None) == 1
-
-
-def test_symlink_replaces_a_file_and_a_dangling_link(tmp_path):
-    target = tmp_path / "real.txt"
-    target.write_text("real", encoding="utf-8")
-    link = tmp_path / "links" / "file.txt"
-    _write(link, "stale")
-    symlink(link, target)
-    assert link.is_symlink()
-    assert link.read_text(encoding="utf-8") == "real"
-
-    dangling = tmp_path / "links" / "dangling.txt"
-    dangling.symlink_to(tmp_path / "gone.txt")
-    symlink(dangling, target)
-    assert dangling.read_text(encoding="utf-8") == "real"
-
-
-def test_importers_follow_query_hash_and_extension_swaps(tmp_path):
-    _write(tmp_path / "src" / "find.ts", "export const value = 1\n")
-    _write(tmp_path / "src" / "raw.mjs", 'import text from "./find.ts?raw";\n')
-    _write(tmp_path / "src" / "hash.mjs", 'import { value } from "./find.ts#top";\n')
-    _write(tmp_path / "src" / "esm.ts", 'import { value } from "./find.js";\n')
-    _write(tmp_path / "src" / "other.ts", 'import { value } from "./other-file";\n')
-    assert importers_of(tmp_path, "src/find.ts") == {"src/raw.mjs", "src/hash.mjs", "src/esm.ts"}
-
-
-def test_importers_skip_outside_paths_build_trees_and_cycles(tmp_path):
-    root = tmp_path / "proj"
-    _write(root / "a.mjs", 'import "./b.mjs";\nimport "../outside.mjs";\n')
-    _write(root / "b.mjs", 'import "./a.mjs";\n')
-    _write(tmp_path / "outside.mjs", "export {}\n")
-    _write(root / "node_modules" / "pkg" / "use.mjs", 'import "../../a.mjs";\n')
-    _write(root / "dist" / "use.mjs", 'import "../a.mjs";\n')
-    assert importers_of(root, "a.mjs") == {"b.mjs"}
-
-
-def test_a_deep_importer_is_copied_through_real_directories(tmp_path):
-    source = tmp_path / "src" / "find.mjs"
-    _write(source, 'export const value = "real"\n')
-    importer = tmp_path / "tests" / "unit" / "use.mjs"
-    _write(importer, 'import { value } from "../../src/find.mjs";\n')
-    _write(tmp_path / "tests" / "unit" / "keep.mjs", "export {}\n")
-    base = new_run_dir(tmp_path)
-    try:
-        worker = create_workers(base, tmp_path, "src/find.mjs", source.read_bytes(), 1)[0]
-        copied = worker / "tests" / "unit" / "use.mjs"
-        assert not (worker / "tests" / "unit").is_symlink()
-        assert not copied.is_symlink()
-        copied.write_text("changed\n", encoding="utf-8")
-        assert importer.read_text(encoding="utf-8").startswith("import")
-        assert (worker / "tests" / "unit" / "keep.mjs").is_symlink()
-    finally:
-        delete_tree(base)
-
-
-def test_a_nested_source_gets_real_directories_down_to_the_file(tmp_path):
-    source = tmp_path / "src" / "pkg" / "demo.py"
-    _write(source, "x = 1\n")
-    _write(tmp_path / "docs" / "notes.txt", "notes")
-    base = tmp_path / "target" / "fresh" / "run"
-    try:
-        worker = create_workers(base, tmp_path, "src/pkg/demo.py", source.read_bytes(), 1)[0]
-        private = worker / "src" / "pkg" / "demo.py"
-        assert not (worker / "src" / "pkg").is_symlink()
-        assert private.read_bytes() == b"x = 1\n"
-        private.write_text("x = 2\n", encoding="utf-8")
-        assert source.read_text(encoding="utf-8") == "x = 1\n"
-        assert (worker / "docs").is_symlink()
-
-        again = create_workers(base, tmp_path, "src/pkg/demo.py", b"x = 3\n", 1)
-        assert again == [worker]
-        assert private.read_bytes() == b"x = 3\n"
-    finally:
-        delete_tree(base)
-    assert source.read_text(encoding="utf-8") == "x = 1\n"

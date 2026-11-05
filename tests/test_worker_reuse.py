@@ -105,15 +105,14 @@ def test_new_command_requires_pristine_check(tmp_path):
     assert {str(command) for command, _ in runner.checks} == {"suite", "['different', 'suite']"}
 
 
-@pytest.mark.parametrize("failure", ["corrupt", "fail"])
-def test_failed_worker_publishes_no_outcomes_and_poisoned_pool(tmp_path, failure):
+def test_failed_worker_publishes_no_outcomes_and_poisoned_pool(tmp_path):
     sources = fixture(tmp_path)
     runner = Runner()
     outcomes = {"history": "killed"}
     with WorkerPool(tmp_path, sources) as pool:
         run(tmp_path, sources[0], runner, pool)
-        setattr(runner, failure, True)
-        with pytest.raises((WorkerBaselineError, OSError)):
+        runner.fail = True
+        with pytest.raises(OSError):
             run(tmp_path, sources[0], runner, pool, outcomes=outcomes)
         assert outcomes == {"history": "killed"}
         assert pool.failed
@@ -123,7 +122,8 @@ def test_failed_worker_publishes_no_outcomes_and_poisoned_pool(tmp_path, failure
 
 
 @pytest.mark.parametrize("failure", ["corrupt", "file", "directory"])
-def test_engine_worker_failure_preserves_previous_snapshot(tmp_path, monkeypatch, failure):
+def test_a_mutant_that_damages_its_view_affects_neither_the_file_nor_the_project(
+        tmp_path, monkeypatch, failure):
     from types import SimpleNamespace
     from mutator import engine
     from mutator.model import History
@@ -133,12 +133,12 @@ def test_engine_worker_failure_preserves_previous_snapshot(tmp_path, monkeypatch
     snapshot.write_bytes(b"previous snapshot\n")
     monkeypatch.setattr(engine, "ensure_crapper", lambda: SimpleNamespace(
         discover=SimpleNamespace(language_of=lambda path: "lua")))
-    monkeypatch.setattr(engine, "sites_in_file", lambda *args: [site(sources[0], 3)])
+    monkeypatch.setattr(engine, "sites_in_file", lambda *args: [site(sources[0], 3), site(sources[0], 2)])
     monkeypatch.setattr(engine, "form_digests", lambda *args: {})
     monkeypatch.setattr(engine, "load_history", lambda *args: History({}, {}))
     monkeypatch.setattr(engine, "test_plan", lambda *args: (["suite"], tmp_path))
     published = []
-    monkeypatch.setattr(engine, "write_results", lambda *args: published.append(args))
+    monkeypatch.setattr(engine, "write_results", lambda *args: published.append(args) or [])
     runner = Runner()
     runner.corrupt = failure == "corrupt"
     runner.remove = None if failure == "corrupt" else failure
@@ -147,10 +147,8 @@ def test_engine_worker_failure_preserves_previous_snapshot(tmp_path, monkeypatch
             sources[0], tmp_path, runner=runner, covered_lines={1}, ignore_coverage=False,
             mutate_all=True, lines=None, test_command=None, timeout_factor=10,
             mutation_warning=50, baselines={}, max_workers=1, worker_pool=pool)
-    assert result.baseline_failed
-    assert result.written == []
-    assert not published
-    assert snapshot.read_bytes() == b"previous snapshot\n"
+    assert not result.baseline_failed
+    assert [args[3] for args in published] == [{"a.lua3": "killed", "a.lua2": "survived"}]
     assert all(source.read_bytes() == b"return 1\n" for source in sources)
 
 
@@ -167,7 +165,7 @@ def test_pool_grows_and_reuses_existing_checks(tmp_path, monkeypatch):
         assert len(runner.checks) == 2
 
 
-def test_cwd_identity_checks_again_and_rejects_linked_cwd(tmp_path):
+def test_cwd_identity_checks_again(tmp_path):
     sources = fixture(tmp_path)
     runner = Runner()
     (tmp_path / "other").mkdir()
@@ -181,12 +179,10 @@ def test_cwd_identity_checks_again_and_rejects_linked_cwd(tmp_path):
         run(tmp_path, sources[0], runner, pool)
         directory = pool.directories[0]
         nested = CwdRunner()
-        pool.check(directory, tmp_path, tmp_path / "src", nested, "suite", 2)
-        pool.check(directory, tmp_path, tmp_path / "src", nested, "suite", 2)
+        for _ in range(2):
+            pool.check(directory, tmp_path, "src/a.lua", b"return 1\n",
+                       tmp_path / "src", nested, "suite", 2)
         assert nested.calls == [directory / "src"]
-        if (directory / "other").is_symlink():
-            with pytest.raises(WorkerBaselineError, match="escapes"):
-                pool.check(directory, tmp_path, tmp_path / "other", nested, "suite", 2)
 
 
 def test_linked_test_input_change_rejected(tmp_path):
@@ -202,37 +198,19 @@ def test_linked_test_input_change_rejected(tmp_path):
             run(tmp_path, sources[1], Runner(), pool)
 
 
-def test_failed_worker_never_checks_next_command_on_dirty_data(tmp_path):
+def test_a_corrupting_mutant_leaves_the_next_commands_check_pristine(tmp_path):
     sources = fixture(tmp_path)
     runner = Runner()
     runner.corrupt = True
     with WorkerPool(tmp_path, sources) as pool:
         chosen = [site(sources[0], value) for value in (2, 3)]
         plans = {chosen[0].mutation_id: ("first", 2), chosen[1].mutation_id: ("second", 2)}
-        with pytest.raises(WorkerBaselineError):
-            run_mutants(tmp_path, sources[0], sources[0].read_bytes(), chosen, 1,
-                        runner, "suite", tmp_path, 2, "a.lua", {}, plans=plans, pool=pool)
-        assert [command for command, _ in runner.checks] == ["first"]
-
-
-@pytest.mark.parametrize("change", ["bytes", "link", "extra"])
-def test_reuse_rejects_binding_or_restoration_changes(tmp_path, change):
-    sources = fixture(tmp_path)
-    with WorkerPool(tmp_path, sources) as pool:
-        run(tmp_path, sources[0], Runner(), pool)
-        worker = pool.directories[0]
-        destination = worker / "src" / "a.lua"
-        if change == "bytes":
-            destination.write_bytes(b"return 9\n")
-        elif change == "link":
-            destination.unlink()
-            destination.symlink_to(sources[0])
-        else:
-            (worker / "cache").write_text("stale runtime state")
         outcomes = {}
-        with pytest.raises(WorkerBaselineError):
-            run(tmp_path, sources[1], Runner(), pool, outcomes=outcomes)
-        assert outcomes == {}
+        run_mutants(tmp_path, sources[0], sources[0].read_bytes(), chosen, 1,
+                    runner, "suite", tmp_path, 2, "a.lua", outcomes, plans=plans, pool=pool)
+        # Every check ran on pristine bytes: the fake runner records only those.
+        assert [command for command, _ in runner.checks] == ["first", "second"]
+        assert outcomes == {"a.lua2": "survived", "a.lua3": "killed"}
 
 
 @pytest.mark.parametrize("prepared", [True, False], ids=["reused", "fresh"])

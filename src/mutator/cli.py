@@ -14,6 +14,7 @@ from mutator.engine import StaleBackupsError, mutate_file, mutate_queued, restor
 from mutator.report import format_decisions, format_results, format_site_log
 from mutator.runner import CommandRunner, Interrupted, stop_commands
 from mutator import timings
+from mutator import sandbox
 from mutator.workers import WorkerPool, WorkerSlots, discard_overlays
 
 HELP = """\
@@ -109,9 +110,9 @@ whose text changed. Killed mutants in unchanged functions are kept.
 Selected mutants of one file run at the same time, one worker per core unless
 --max-workers says otherwise. Full-suite Lua files share one worker queue, so
 mutants of the next file start while the current file finishes; each file's
-snapshot is written when its own mutants are done. A worker is a symlink
-overlay under target/mutation-workers with its own copy of the mutated file. The project tree
-is left unchanged. Rust workers keep their Cargo build output in
+snapshot is written when its own mutants are done. Each mutant runs in
+its own overlay view mounted under target/mutation-workers; what its tests
+write is discarded with the view, so the project tree is left unchanged. Rust workers keep their Cargo build output in
 target/mutation-workers/cargo-slot-<n>/target across runs; cargo clean
 removes it. mutator never writes to a project source. A non-scan run
 refuses to start while target/mutator-backup/ holds files from an older
@@ -653,6 +654,11 @@ def run(argv: list[str] | None = None) -> int:
     if warning:
         print(warning, file=sys.stderr)
     if sys.platform == "win32":
+        return 1
+    try:
+        sandbox.enter()
+    except sandbox.SandboxError as error:
+        print(error, file=sys.stderr)
         return 1
     files = select_files(options)
     if not files:
