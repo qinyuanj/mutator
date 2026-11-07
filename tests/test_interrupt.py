@@ -83,6 +83,39 @@ def test_an_interrupted_run_kills_its_tests_and_removes_its_overlays(tmp_path, s
     assert not (project / ".metrics").exists()
 
 
+@pytest.mark.skipif(not WINDOWS, reason="Windows baseline homes use locked, recoverable run directories")
+def test_a_killed_baseline_home_is_swept_by_the_next_run(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    source = project / "calc.py"
+    source.write_bytes(ORIGINAL)
+    marker = tmp_path / "baseline.pid"
+    check = tmp_path / "baseline.py"
+    check.write_text(f"import os, time\nopen({str(marker)!r}, 'w').write(str(os.getpid()))\ntime.sleep(60)\n",
+                     encoding="utf-8")
+    process = subprocess.Popen(
+        [sys.executable, "-m", "mutator", "--no-coverage", "--mutate-all",
+         "--test-command", f'"{sys.executable}" "{check}"', str(source)],
+        cwd=project, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    try:
+        assert _wait(lambda: marker.exists() and marker.read_text().strip())
+        pid = int(marker.read_text())
+    finally:
+        process.kill()
+        process.communicate(timeout=30)
+    assert _wait(lambda: not alive(pid), 5)
+    workers = project / "target" / "mutation-workers"
+    assert list(workers.glob("run-home-*"))
+    rerun = subprocess.run(
+        [sys.executable, "-m", "mutator", "--no-coverage", "--mutate-all", "--max-workers", "1",
+         "--test-command", f'"{sys.executable}" -c "raise SystemExit(0)"', str(source)],
+        cwd=project, capture_output=True, text=True, timeout=120,
+    )
+    assert rerun.returncode == 3, rerun.stderr
+    assert not list(workers.glob("run-*"))
+
+
 @pytest.mark.skipif(not WINDOWS, reason="a SIGKILLed mutator's Linux test sessions outlive it; "
                     "its views vanish with its namespace")
 def test_a_killed_mutator_leaves_no_test_running_and_the_next_run_sweeps_its_copies(tmp_path):

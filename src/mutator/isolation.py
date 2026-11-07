@@ -492,9 +492,12 @@ class CopyViews:
         if _key(location) in self._homes:
             yield
             return
-        parent = location / "target" / "mutation-homes"
+        parent = location / "target" / "mutation-workers"
         parent.mkdir(parents=True, exist_ok=True)
-        home = Path(tempfile.mkdtemp(prefix="home-", dir=parent))
+        self.sweep(parent)
+        directory = Path(tempfile.mkdtemp(prefix="run-home-", dir=parent))
+        self.claim_run(directory)
+        home = directory / ".home-baseline"
         self._command.home = home
         try:
             for folder in set(_REDIRECTED.values()):
@@ -502,7 +505,8 @@ class CopyViews:
             yield
         finally:
             self._command.home = None
-            delete_tree(home)
+            self.release_run(directory)
+            delete_tree(directory)
 
     def redirect(self, worker: Path, environment: dict) -> None:
         """Point home, profile, temp and app-data of a command into its home."""

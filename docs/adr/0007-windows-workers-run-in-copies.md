@@ -44,7 +44,7 @@ test walking its project does not discover its redirected home. Existing
 Cargo/rustup, Go, Python-user-site and npm locations are pinned before those
 variables change; LuaRocks module paths are pinned before launch too. These
 are toolchain inputs, outside the redirected locations. The initial baseline
-command also gets a private home under hidden target/mutation-homes output;
+command also gets a private home under a locked target/mutation-workers run;
 only its working directory remains the real tree, as before. The copy and home
 are deleted after the command. Read-only files are made writable and Windows
 sharing failures are retried. A killed mutator leaves copies on disk: run

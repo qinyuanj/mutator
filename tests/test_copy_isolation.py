@@ -84,7 +84,7 @@ def test_the_baseline_also_writes_into_a_private_home(tmp_path, monkeypatch):
     assert result.code == 0, result.output
     assert not list(real_home.iterdir())
     assert not list(project.rglob("leak"))
-    assert not list((project / "target" / "mutation-homes").iterdir())
+    assert not list((project / "target" / "mutation-workers").iterdir())
 
 
 @pytest.mark.skipif(not WINDOWS, reason="the fixture deliberately calls a native Win32 API")
