@@ -9,6 +9,36 @@ from mutator.runner import CommandRunner, _clojure_command, _python_command, nea
 from mutator.runner import test_plan as plan_command
 
 
+@pytest.mark.skipif(sys.platform != 'win32', reason='Windows batch argv contract')
+def test_batch_command_receives_literal_arguments(tmp_path, monkeypatch):
+    import json
+
+    monkeypatch.setenv('SPEC_LITERAL_ARG', 'expanded')
+    batch = tmp_path / 'probe.cmd'
+    batch.write_bytes(b'@echo off\r\nnode -e "console.log(JSON.stringify(process.argv.slice(1)))" %*\r\n')
+    arguments = ['%SPEC_LITERAL_ARG%', 'space here', 'a&b', 'a|b', 'a^b', 'a!b', '', 'a"b', 'trail\\']
+    result = CommandRunner().run([str(batch), *arguments], tmp_path, 5)
+    assert result.code == 0, result.output
+    assert json.loads(result.output) == arguments
+
+
+def test_luarocks_probe_keeps_its_thirty_second_deadline(monkeypatch):
+    from mutator import runner
+    from mutator.crapper_link import ensure_crapper
+
+    monkeypatch.setattr(runner, '_LUA_TREES', None)
+    monkeypatch.setattr(runner.shutil, 'which', lambda name: 'luarocks')
+    deadlines = []
+
+    def stuck(command, cwd, capture=False, timeout=None):
+        deadlines.append(timeout)
+        raise subprocess.TimeoutExpired(command, timeout)
+
+    monkeypatch.setattr(ensure_crapper().platform, 'run', stuck)
+    assert runner._rocks_trees() == []
+    assert deadlines == [30]
+
+
 def test_nearest_walks_up_to_the_marker(tmp_path):
     root = tmp_path / "proj"
     nested = root / "src" / "demo"

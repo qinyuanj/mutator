@@ -357,9 +357,9 @@ def _key(worker: Path) -> str:
 def _copy_tree(source: Path, destination: Path, skip: set[Path], copy_file, project: Path | None = None) -> None:
     """Copy ``source`` to ``destination`` the way a view shows it.
 
-    ``skip`` (hidden build output) becomes an empty directory. Links are
-    recreated, never followed. Installed node_modules is copied too: linking
-    it back to the checkout would let a mutant change project files.
+    ``skip`` (hidden build output) becomes an empty directory. Directory links
+    are refused and file links become independent files. Installed node_modules
+    is copied too: linking it back would let a mutant change project files.
     """
 
     project = source.resolve() if project is None else project
@@ -370,13 +370,16 @@ def _copy_tree(source: Path, destination: Path, skip: set[Path], copy_file, proj
             if path in skip:
                 target.mkdir()
             elif entry.is_symlink() or _is_junction(path):
-                # Absolute project links and junctions would bypass the copy.
-                # Refuse them before starting the command rather than expose
-                # the checkout. Relative file links stay inside the copy.
-                if path.resolve().is_relative_to(project) and (
-                        path.is_dir() or os.path.isabs(os.readlink(path))):
-                    raise IsolationUnavailable(f"Copy isolation cannot freeze linked project path: {path}")
-                _relink(path, target)
+                # An external directory can contain a route back to the
+                # checkout (including an ancestor or a junction cycle). Never
+                # expose a directory binding outside the fresh copy.
+                if _is_junction(path) or path.is_dir():
+                    raise IsolationUnavailable(f"Copy isolation cannot freeze linked directory: {path}")
+                if not path.is_file():
+                    raise IsolationUnavailable(f"Copy isolation cannot freeze unresolved link: {path}")
+                # Materialize file symlinks too: an absolute or ../ binding
+                # could otherwise bypass the worker. copy2 breaks hardlinks.
+                copy_file(path.resolve(), target)
             elif entry.is_dir():
                 _copy_tree(path, target, skip, copy_file, project)
             elif entry.is_file():
@@ -388,32 +391,6 @@ def _is_junction(path: Path) -> bool:
     if hasattr(path, "is_junction"):
         return path.is_junction()
     return WINDOWS and is_link(path) and not path.is_symlink() and path.is_dir()
-
-
-def _link_directory(real: Path, target: Path) -> None:
-    import _winapi
-
-    _winapi.CreateJunction(str(real), str(target))
-
-
-def _relink(path: Path, target: Path) -> None:
-    """Recreate a project link; a junction where symlinks need a privilege."""
-
-    if _is_junction(path):
-        _link_directory(Path(os.path.realpath(path)), target)
-        return
-    pointed = os.readlink(path)
-    directory = path.is_dir()
-    try:
-        os.symlink(pointed, target, target_is_directory=directory)
-    except OSError as error:
-        if getattr(error, "winerror", None) != 1314:  # no symlink privilege
-            raise
-        real = Path(os.path.realpath(path))
-        if directory:
-            _link_directory(real, target)
-        elif real.is_file():
-            shutil.copy2(real, target)
 
 
 class CopyViews:

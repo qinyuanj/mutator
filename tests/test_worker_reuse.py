@@ -3,7 +3,8 @@ from pathlib import Path
 
 import pytest
 
-from host import link_directory, remove_directory_link
+from host import WINDOWS, link_directory, remove_directory_link
+from mutator.isolation import IsolationUnavailable
 from mutator.model import Site
 from mutator.runner import CommandResult
 from mutator.workers import WorkerBaselineError, WorkerPool, run_mutants
@@ -251,6 +252,10 @@ def test_link_to_a_directory_outside_the_project_is_an_external_input(tmp_path):
     # the link itself is the project's input and stays bound.
     root, sources = linked_project(tmp_path, outside(tmp_path))
     with WorkerPool(root, sources) as pool:
+        if WINDOWS:
+            with pytest.raises(IsolationUnavailable, match="linked directory"):
+                run(root, sources[0], Runner(), pool)
+            return
         assert run(root, sources[0], Runner(), pool) == {"a.lua2": "survived", "a.lua3": "killed"}
         (tmp_path / "outside" / "notes.md").write_text("edited")
         assert run(root, sources[1], Runner(), pool) == {"b.lua2": "survived", "b.lua3": "killed"}
@@ -260,10 +265,14 @@ def test_retargeting_an_outside_link_is_a_project_input_change(tmp_path):
     root, sources = linked_project(tmp_path, outside(tmp_path))
     (tmp_path / "elsewhere").mkdir()
     with WorkerPool(root, sources) as pool:
-        run(root, sources[0], Runner(), pool)
+        if WINDOWS:
+            with pytest.raises(IsolationUnavailable, match="linked directory"):
+                run(root, sources[0], Runner(), pool)
+        else:
+            run(root, sources[0], Runner(), pool)
         remove_directory_link(root / "design")
         link_directory(root / "design", tmp_path / "elsewhere")
-        with pytest.raises(WorkerBaselineError, match="Project inputs"):
+        with pytest.raises(WorkerBaselineError, match="pool failed" if WINDOWS else "Project inputs"):
             run(root, sources[1], Runner(), pool)
 
 

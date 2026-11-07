@@ -72,17 +72,19 @@ keys, including old snapshots without isolation. The summary declares the
 mechanism used for the current run.
 
 Copy isolation protects relative writes into the copied tree and the
-redirected locations; it is not an OS security boundary. Absolute paths,
-external directory links and toolchain inputs can still reach outside it;
-registry, network and other OS resources are not contained. Project links are
-recreated without traversal; directory junctions substitute where Windows
-refuses symlink creation, and file links are copied if that privilege is
-unavailable. Internal directory links remain rejected by worker reuse. Copies also refuse
-internal directory links and absolute links back into the project before any
-command starts; recreating such a binding could expose the checkout.
+redirected locations; it is not an OS security boundary. Explicit absolute
+paths and toolchain inputs can still reach outside it; registry, network and
+other OS resources are not contained. Copies refuse every directory symlink
+and junction before starting a command, including external targets: an
+ancestor or an external directory containing another link could lead back
+into the checkout. This also avoids traversing junction cycles. File symlinks
+are materialized as independent files, and copies break existing hardlinks;
+unresolved links are refused. Linux namespace views are unchanged.
 Windows shell overrides use cmd.exe; generated argument vectors resolve
-through PATHEXT. A .cmd/.bat program still parses its own arguments under
-cmd.exe rules. Native Lua may be unable to open non-ANSI source paths.
+through PATHEXT, including explicit extensionless launcher paths. Shared
+batch argument serialization preserves literal values through ordinary %*
+forwarding; a batch script can still explicitly interpret its own inputs.
+Native Lua may be unable to open non-ANSI source paths.
 
 ## Considered options
 

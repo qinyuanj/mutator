@@ -301,8 +301,9 @@ python -m venv .venv
 The installed `mutator.exe` console entry works in either shell. User
 `--test-command` and `--coverage-command` strings use **cmd.exe** on Windows
 (`/bin/sh` on Linux); quote paths for that shell. Generated commands resolve
-executables through PATHEXT, so npm.cmd and mvn.cmd are found. Their arguments
-are still subject to the launcher's cmd.exe parsing. Windows Clojure CLI
+executables through PATHEXT, so npm.cmd and mvn.cmd are found. Shared batch
+serialization preserves literal arguments through ordinary launcher forwarding.
+Windows Clojure CLI
 installed solely as a PowerShell module needs a custom command.
 
 Windows runs with **copy isolation**: a fresh copy of the project per pristine
@@ -323,12 +324,12 @@ Windows 11 24H2+, Python's CopyFile2 automatically block-clones. Keep the
 project and its target directory on that volume. NTFS and older builds make
 full copies with the same results, at a higher cost for large dependencies.
 
-Copy isolation has no OS enforcement against **absolute paths outside the
-copy, external links, pinned toolchain stores, registry or network**. Tests
-must be trusted. Project symlinks are recreated without copying through them;
-Developer Mode enables symlink creation without elevation. Without that
-privilege, directory links use junctions and file links become copies. Native
-Lua distributions may not open non-ANSI paths. See
+Copy isolation has no OS enforcement against **explicit absolute paths outside
+the copy, pinned toolchain stores, registry or network**. Tests must be trusted.
+Directory symlinks and junctions are refused before commands start, including
+external links that could route relative writes back into the checkout. File
+symlinks become independent files; copying also breaks hardlinks. Unresolved
+links are refused. Native Lua distributions may not open non-ANSI paths. See
 [ADR 0007](docs/adr/0007-windows-workers-run-in-copies.md), which partially
 supersedes [ADR 0006](docs/adr/0006-mutants-run-in-overlay-views.md) for Windows.
 Linux still refuses to run when user namespaces are unavailable.

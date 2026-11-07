@@ -759,7 +759,11 @@ def run(argv: list[str] | None = None) -> int:
     if options.scan:
         return _scan(options, root, files)
     with timings.measure("mutation-run"):
-        code = _interruptible(lambda: _mutate_files(options, root, files, indexes))
+        try:
+            code = _interruptible(lambda: _mutate_files(options, root, files, indexes))
+        except IsolationUnavailable as error:
+            print(error, file=sys.stderr)
+            return 1
     if options.timings:
         print(timings.summary(), file=sys.stderr, end="")
     return code

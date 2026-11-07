@@ -382,7 +382,7 @@ def _redirect_worker_home(cwd: Path, environment: dict) -> None:
     isolation.current().redirect(worker or cwd, environment)
 
 
-def _windows_argv(command: list[str], environment: dict) -> list[str]:
+def _windows_argv(command: list[str], environment: dict, cwd: Path | None = None) -> list[str]:
     """An argument vector CreateProcess can start, as sh would have run it.
 
     An `env VAR=...` prefix becomes the environment, since Windows has no
@@ -401,7 +401,7 @@ def _windows_argv(command: list[str], environment: dict) -> list[str]:
         command = command[index:]
     if command == ["false"]:
         return [sys.executable, "-c", "raise SystemExit(1)"]
-    return ensure_crapper().platform.resolve(command)
+    return ensure_crapper().platform.resolve(command, cwd, environment)
 
 
 def _launch(command: Command, cwd: Path, environment: dict) -> subprocess.Popen:
@@ -430,7 +430,7 @@ def _launch(command: Command, cwd: Path, environment: dict) -> subprocess.Popen:
 
     limit = _lua_memory_bytes(command)
     if isinstance(command, list):
-        command = _windows_argv(command, environment)
+        command = ensure_crapper().platform.command_line(_windows_argv(command, environment, cwd), environment)
     job = winjob.Job(process_memory=limit)
     try:
         process = subprocess.Popen(
@@ -729,7 +729,7 @@ def _rocks_trees() -> list[str]:
             try:
                 result = ensure_crapper().platform.run(
                     [exe, "--lua-version", "5.4", "config", "rocks_trees"],
-                    Path.cwd(), capture=True,
+                    Path.cwd(), capture=True, timeout=30,
                 )
             except (OSError, subprocess.TimeoutExpired):
                 result = None

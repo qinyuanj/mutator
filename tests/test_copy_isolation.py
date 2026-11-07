@@ -132,6 +132,101 @@ def test_the_copier_is_a_parameter_so_another_hosts_clone_call_plugs_in(tmp_path
     assert not any(worker.iterdir())
 
 
+@pytest.mark.skipif(not WINDOWS, reason="real Windows directory junction")
+@pytest.mark.parametrize('target_kind', ['parent', 'external', 'cycle'])
+def test_copy_refuses_directory_junctions_before_mutants_can_reach_checkout(tmp_path, target_kind):
+    import _winapi
+    from mutator.isolation import IsolationUnavailable
+
+    project = tmp_path / 'project'
+    project.mkdir()
+    _project(project)
+    keep = project / 'keep.txt'
+    keep.write_bytes(b'original')
+    external = tmp_path / 'external'
+    external.mkdir()
+    if target_kind == 'external':
+        _winapi.CreateJunction(str(project), str(external / 'back'))
+    target = {'parent': tmp_path, 'external': external, 'cycle': project}[target_kind]
+    _winapi.CreateJunction(str(target), str(project / 'bridge'))
+    worker = tmp_path / 'workers' / 'worker-0'
+    views = CopyViews()
+    views.prepare(worker, project, ['pkg/value.py'], {})
+    try:
+        with pytest.raises(IsolationUnavailable, match='linked directory'):
+            with views.view(worker, project, 'pkg/value.py', b'value = 2\n'):
+                route = {'parent': 'project/keep.txt', 'external': 'back/keep.txt', 'cycle': 'keep.txt'}[target_kind]
+                (worker / 'bridge' / route).write_bytes(b'changed')
+        assert keep.read_bytes() == b'original'
+        assert not any(worker.iterdir())
+    finally:
+        # Remove junction bindings explicitly; never traverse their targets.
+        (project / 'bridge').rmdir()
+        if (external / 'back').exists():
+            (external / 'back').rmdir()
+
+
+@pytest.mark.skipif(not WINDOWS, reason='Windows copy refusal at the CLI')
+def test_cli_reports_unsafe_directory_link_without_publishing(tmp_path, capsys):
+    import _winapi
+    from host import shell_command
+    from mutator.cli import run
+
+    project = tmp_path / 'project'
+    project.mkdir()
+    source = _project(project)
+    source.write_bytes(b'def value():\n    return 1\n')
+    snapshot = project / '.metrics' / 'mutate' / 'value.edn'
+    snapshot.parent.mkdir(parents=True)
+    snapshot.write_bytes(b'previous snapshot\n')
+    _winapi.CreateJunction(str(tmp_path), str(project / 'bridge'))
+    try:
+        code = run(['--root', str(project), '--no-coverage', '--mutate-all',
+                    '--test-command', shell_command([sys.executable, '-c', 'raise SystemExit(0)']), str(source)])
+        assert code == 1
+        assert 'linked directory' in capsys.readouterr().err
+        assert snapshot.read_bytes() == b'previous snapshot\n'
+    finally:
+        (project / 'bridge').rmdir()
+
+
+@pytest.mark.parametrize('external', [False, True])
+def test_file_symlinks_become_independent_files(tmp_path, external):
+    from host import symlink_file
+
+    project = tmp_path / 'project'
+    project.mkdir()
+    _project(project)
+    keep = (tmp_path if external else project) / 'keep.txt'
+    keep.write_bytes(b'original')
+    symlink_file(project / 'alias.txt', keep)
+    worker = tmp_path / 'workers' / 'worker-0'
+    views = CopyViews()
+    views.prepare(worker, project, ['pkg/value.py'], {})
+    with views.view(worker, project, 'pkg/value.py', b'value = 2\n'):
+        assert not (worker / 'alias.txt').is_symlink()
+        (worker / 'alias.txt').write_bytes(b'changed')
+    assert keep.read_bytes() == b'original'
+
+
+def test_hardlinked_files_are_copied_as_independent_files(tmp_path):
+    import os
+
+    project = tmp_path / 'project'
+    project.mkdir()
+    _project(project)
+    keep = project / 'keep.txt'
+    keep.write_bytes(b'original')
+    os.link(keep, project / 'alias.txt')
+    worker = tmp_path / 'workers' / 'worker-0'
+    views = CopyViews()
+    views.prepare(worker, project, ['pkg/value.py'], {})
+    with views.view(worker, project, 'pkg/value.py', b'value = 2\n'):
+        (worker / 'alias.txt').write_bytes(b'changed')
+        assert (worker / 'keep.txt').read_bytes() == b'original'
+    assert keep.read_bytes() == b'original'
+
+
 # Declared volumes: this host has no ReFS, so the block-clone decision is
 # tested on what GetVolumeInformation would report.
 @pytest.mark.parametrize("filesystem, flags, build, expected", [
