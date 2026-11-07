@@ -1,37 +1,52 @@
-"""A command that exits leaves nothing behind in its process group (issue #22)."""
+"""A command that exits leaves nothing behind in its process group (issue #22).
 
+On Windows the group is the command's Job Object; its leftovers are ended as
+soon as the command exits, since nothing can ask them to stop first.
+"""
+
+import sys
 import time
 from pathlib import Path
 
+import pytest
 
+from host import WINDOWS, alive, shell_command
 from mutator import runner
 from mutator.runner import CommandResult, CommandRunner
 
-
-def _alive(pid: int) -> bool:
-    try:
-        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
-    except (FileNotFoundError, ProcessLookupError):
-        return False
-    return state != "Z"
+# Starts a child that outlives it, records the child's pid, then exits.
+LEAVE = (
+    "import subprocess, sys\n"
+    "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)'],\n"
+    "                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+    "open(sys.argv[1], 'w').write(str(child.pid))\n"
+    "print('done', flush=True)\n"
+    "sys.exit(int(sys.argv[2]))\n"
+)
 
 
 def _gone_soon(pid: int, seconds: float = 2.0) -> bool:
     # The reparented child is reaped by init, which may lag a moment.
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
-        if not _alive(pid):
+        if not alive(pid):
             return True
         time.sleep(0.02)
-    return not _alive(pid)
+    return not alive(pid)
 
 
 def _left_behind(tmp_path: Path, code: int, trap: str = "") -> tuple[CommandResult, int]:
     pidfile = tmp_path / "child.pid"
-    command = (
-        f"sh -c '{trap}sleep 600' >/dev/null 2>&1 & echo $! > {pidfile}; "
-        f"echo done; exit {code}"
-    )
+    if trap:
+        # A child that ignores SIGTERM: a POSIX shell's trap.
+        command = (
+            f"sh -c '{trap}sleep 600' >/dev/null 2>&1 & echo $! > {pidfile}; "
+            f"echo done; exit {code}"
+        )
+    else:
+        script = tmp_path / "leave.py"
+        script.write_text(LEAVE, encoding="utf-8")
+        command = shell_command([sys.executable, str(script), str(pidfile), str(code)])
     result = CommandRunner().run(command, tmp_path, 30)
     return result, int(pidfile.read_text().strip())
 
@@ -51,6 +66,7 @@ def test_a_failing_command_keeps_its_code_and_loses_its_child(tmp_path):
     assert _gone_soon(child)
 
 
+@pytest.mark.skipif(WINDOWS, reason="SIGTERM and its grace are POSIX; a Windows job ends leftovers at once")
 def test_a_child_that_ignores_sigterm_is_killed_after_the_grace(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "REAP_GRACE", 0.3)
     result, child = _left_behind(tmp_path, 0, trap="trap \"\" TERM; ")
@@ -60,7 +76,7 @@ def test_a_child_that_ignores_sigterm_is_killed_after_the_grace(tmp_path, monkey
 
 def test_the_reap_time_is_not_charged_to_the_command(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "REAP_GRACE", 1.0)
-    result, child = _left_behind(tmp_path, 0, trap="trap \"\" TERM; ")
+    result, child = _left_behind(tmp_path, 0, trap="" if WINDOWS else "trap \"\" TERM; ")
     assert result.seconds < 0.8
     assert _gone_soon(child)
 
@@ -70,5 +86,5 @@ def test_a_command_that_leaves_nothing_does_not_wait_out_the_grace(tmp_path, mon
     started = time.monotonic()
     result = CommandRunner().run("echo quiet", tmp_path, 30)
     assert result.code == 0
-    assert result.output == "quiet\n"
+    assert result.output == "quiet\n"  # text mode folds cmd.exe's CRLF
     assert time.monotonic() - started < 1.0

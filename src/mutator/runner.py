@@ -14,7 +14,12 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from mutator import isolation
 from mutator.crapper_link import ensure_crapper
+
+WINDOWS = sys.platform == "win32"
+if WINDOWS:
+    from mutator import winjob
 
 Command = str | list[str]
 
@@ -42,9 +47,22 @@ _running_lock = threading.Lock()
 _stopped: int | None = None
 
 
-def _kill_group(process: subprocess.Popen, signum: int = signal.SIGKILL) -> bool:
-    """Signal the command's process group; False when the group is empty."""
+# Windows has no signals to send; a command's tree is its Job Object.
+_KILL = getattr(signal, "SIGKILL", 9)
 
+
+def _kill_group(process: subprocess.Popen, signum: int = _KILL) -> bool:
+    """Signal the command's process group; False when the group is empty.
+
+    On Windows any signal but 0 terminates the command's job.
+    """
+
+    job = getattr(process, "mutator_job", None)
+    if job is not None:
+        alive = job.active() > 0
+        if signum and alive:
+            job.terminate(1)
+        return alive
     try:
         os.killpg(process.pid, signum)
     except ProcessLookupError:
@@ -100,8 +118,15 @@ def _reap_group(process: subprocess.Popen) -> None:
     closes the pid-reuse window for it. Later probes run after the leader is
     reaped and rely on the leftovers holding the group id; only a pid wrap
     within one poll interval could misdirect them.
+
+    On Windows nothing can ask a process to stop, so the leftovers are ended
+    as soon as the leader has exited.
     """
 
+    if getattr(process, "mutator_job", None) is not None:
+        process.wait()
+        _kill_group(process)
+        return
     _kill_group(process, signal.SIGTERM)
     process.wait()
     deadline = time.monotonic() + REAP_GRACE
@@ -239,25 +264,33 @@ def _prefer_worker_lua(cwd: Path, environment: dict, command: Command) -> Comman
 _LUA_MEMORY_MB = 2048
 
 
+def _lua_memory_bytes(command: Command) -> int | None:
+    """The memory cap of a generated Lua run, or None for any other command."""
+
+    if not isinstance(command, list) or not command:
+        return None
+    if not Path(lua_executable(command)).name.lower().startswith("lua"):
+        return None
+    megabytes = int(os.environ.get("MUTATOR_LUA_MEMORY_MB", _LUA_MEMORY_MB))
+    return megabytes * 1024 * 1024 if megabytes > 0 else None
+
+
 def _memory_limit(command: Command):
     """Cap a generated Lua run's address space so a runaway mutant fails fast.
 
     A mutant stuck in an allocating loop otherwise grows until its timeout and
     can exhaust the machine. The pristine suite peaks well under the cap; a
     mutant that hits it raises "not enough memory" and fails like any other
-    error. `MUTATOR_LUA_MEMORY_MB=0` disables the cap.
+    error. `MUTATOR_LUA_MEMORY_MB=0` disables the cap. On Windows the same
+    cap is the job's per-process commit limit.
     """
 
-    if not isinstance(command, list) or not command or os.name != "posix":
+    if os.name != "posix":
         return None
-    if not Path(lua_executable(command)).name.startswith("lua"):
-        return None
-    megabytes = int(os.environ.get("MUTATOR_LUA_MEMORY_MB", _LUA_MEMORY_MB))
-    if megabytes <= 0:
+    limit = _lua_memory_bytes(command)
+    if limit is None:
         return None
     import resource
-
-    limit = megabytes * 1024 * 1024
 
     def apply():
         resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
@@ -278,7 +311,7 @@ def _resident_cap(cwd: Path, timeout: float | None) -> int | None:
     timeout. `MUTATOR_RUST_MEMORY_MB=0` disables the cap.
     """
 
-    if timeout is None or not Path("/proc/self/statm").is_file():
+    if timeout is None or not (WINDOWS or Path("/proc/self/statm").is_file()):
         return None
     worker = _worker_home(cwd.resolve())
     if worker is None or not worker.parent.name.startswith(SLOT_PREFIX):
@@ -312,7 +345,8 @@ def _join_within(reader: threading.Thread, process, timeout, cap) -> bool:
         return True
     deadline = time.monotonic() + timeout
     while reader.is_alive() and time.monotonic() < deadline:
-        if _group_resident(process.pid) > cap:
+        job = getattr(process, "mutator_job", None)
+        if (job.resident() if job is not None else _group_resident(process.pid)) > cap:
             return False
         reader.join(min(0.2, max(0.0, deadline - time.monotonic())))
     return True
@@ -335,6 +369,85 @@ def _share_cores(cwd: Path, environment: dict, workers: int) -> None:
     if "CARGO_BUILD_JOBS" in os.environ or _worker_home(cwd.resolve()) is None:
         return
     environment["CARGO_BUILD_JOBS"] = str(max(1, (os.cpu_count() or 1) // max(1, workers)))
+
+
+def _redirect_worker_home(cwd: Path, environment: dict) -> None:
+    """Point a view's command at the view's own home, temp and app data."""
+
+    worker = _worker_home(cwd.resolve())
+    if worker is not None:
+        isolation.current().redirect(worker, environment)
+
+
+def _windows_argv(command: list[str], environment: dict) -> list[str]:
+    """An argument vector CreateProcess can start, as sh would have run it.
+
+    An `env VAR=...` prefix becomes the environment, since Windows has no
+    `env`; `false` becomes a Python that fails; a bare program name is looked
+    up through PATHEXT, so `npm` finds `npm.cmd`. A `.cmd` program parses its
+    own arguments with cmd.exe rules; generated commands pass it only paths
+    and flags.
+    """
+
+    if command and command[0] == "env":
+        index = 1
+        while index < len(command) and "=" in command[index].split("/")[0]:
+            name, _separator, value = command[index].partition("=")
+            environment[name] = value
+            index += 1
+        command = command[index:]
+    if command == ["false"]:
+        return [sys.executable, "-c", "raise SystemExit(1)"]
+    if command and not os.path.dirname(command[0]):
+        found = shutil.which(command[0], path=environment.get("PATH"))
+        if found:
+            return [found, *command[1:]]
+    return command
+
+
+def _launch(command: Command, cwd: Path, environment: dict) -> subprocess.Popen:
+    """Start the command in its own process group, or on Windows its own job.
+
+    A Windows command starts suspended and joins a kill-on-close job before it
+    runs, so every process it starts is in the job. Ctrl+C reaches mutator
+    only, as with a new session on Linux.
+    """
+
+    options = dict(
+        cwd=cwd,
+        shell=isinstance(command, str),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        # A mutant can split a multibyte string; its output is only
+        # read for the log, so bad bytes must not lose the outcome.
+        encoding="utf-8",
+        errors="replace",
+        env=environment,
+    )
+    if not WINDOWS:
+        return subprocess.Popen(command, start_new_session=True,
+                                preexec_fn=_memory_limit(command), **options)
+    limit = _lua_memory_bytes(command)
+    if isinstance(command, list):
+        command = _windows_argv(command, environment)
+    job = winjob.Job(process_memory=limit)
+    try:
+        process = subprocess.Popen(
+            command, creationflags=winjob.CREATE_SUSPENDED | winjob.CREATE_NEW_PROCESS_GROUP, **options)
+    except BaseException:
+        job.close()
+        raise
+    try:
+        job.adopt(process)
+    except BaseException:
+        # It never ran: end it and its job before reporting the failure.
+        process.kill()
+        process.wait()
+        process.stdout.close()
+        job.close()
+        raise
+    process.mutator_job = job
+    return process
 
 
 class CommandRunner:
@@ -360,22 +473,10 @@ class CommandRunner:
         _share_cores(cwd, environment, self.workers)
         _use_slot_target(cwd, environment)
         command = _prefer_worker_lua(cwd, environment, command)
+        _redirect_worker_home(cwd, environment)
         _check_stopped()
         try:
-            process = subprocess.Popen(
-                command,
-                cwd=cwd,
-                shell=isinstance(command, str),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-                # A mutant can split a multibyte string; its output is only
-                # read for the log, so bad bytes must not lose the outcome.
-                encoding="utf-8",
-                errors="replace",
-                env=environment,
-                preexec_fn=_memory_limit(command),
-            )
+            process = _launch(command, cwd, environment)
         except OSError as exc:
             seconds = time.monotonic() - started
             return CommandResult(
@@ -431,6 +532,9 @@ class CommandRunner:
         finally:
             with _running_lock:
                 _running.discard(process)
+            job = getattr(process, "mutator_job", None)
+            if job is not None:
+                job.close()
         # A command killed by the interrupt has no outcome, not a kill.
         _check_stopped()
         if failures:
@@ -508,8 +612,11 @@ def _project_interpreter(directory: Path) -> str:
     not link ``.venv``, and resolving ``bin/python`` would leave the virtualenv.
     """
 
+    # Every file is "executable" to os.access on Windows; the .exe suffix is
+    # what CreateProcess needs.
+    layout = Path("Scripts", "python.exe") if WINDOWS else Path("bin", "python")
     for name in (".venv", "venv"):
-        candidate = (directory / name / "bin" / "python").absolute()
+        candidate = (directory / name / layout).absolute()
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return str(candidate)
     return sys.executable
@@ -596,6 +703,14 @@ def _lua_worker_setup() -> str:
 _LUA_TREES: list[str] | None = None
 
 
+def _absolute(entry: str) -> bool:
+    """An absolute path: `/...`, or on Windows also `C:/...` or `C:\\...`."""
+
+    if WINDOWS:
+        return bool(re.match(r"[A-Za-z]:[\\/]|[\\/]", entry))
+    return entry.startswith("/")
+
+
 def _rocks_trees() -> list[str]:
     """The machine's LuaRocks 5.4 trees, or [] when luarocks is unusable."""
 
@@ -614,8 +729,9 @@ def _rocks_trees() -> list[str]:
                 result = None
         if result is not None and result.returncode == 0:
             _LUA_TREES = [
-                match for match in re.findall(r'"([^"]+)"', result.stdout)
-                if match.startswith("/")
+                match.replace("\\", "/") if WINDOWS else match
+                for match in re.findall(r'"([^"]+)"', result.stdout)
+                if _absolute(match)
             ]
     return _LUA_TREES
 
@@ -640,8 +756,13 @@ def _pinned_lua_paths(directory: Path) -> tuple[str, str] | None:
         return None
 
     def keep(entry: str) -> bool:
-        return not entry.startswith("/") or any(
-            entry == tree or entry.startswith(tree + "/") for tree in trees
+        if WINDOWS:
+            entry = os.path.normcase(entry.replace("\\", "/")).replace("\\", "/")
+            folded = [os.path.normcase(tree).replace("\\", "/") for tree in trees]
+        else:
+            folded = trees
+        return not _absolute(entry) or any(
+            entry == tree or entry.startswith(tree + "/") for tree in folded
         )
 
     def filtered(*names: str) -> list[str]:
@@ -657,11 +778,12 @@ def _pinned_lua_paths(directory: Path) -> tuple[str, str] | None:
     # Absolute module-directory templates: relative ones cannot be validated
     # against the project root, and the worker rebase maps these into overlays.
     root = directory.as_posix()
+    library = "dll" if WINDOWS else "so"
     path += [f"{root}/?.lua", f"{root}/?/init.lua"]
-    cpath.append(f"{root}/?.so")
+    cpath.append(f"{root}/?.{library}")
     for tree in trees:
         path += [f"{tree}/share/lua/5.4/?.lua", f"{tree}/share/lua/5.4/?/init.lua"]
-        cpath += [f"{tree}/lib/lua/5.4/?.so", f"{tree}/lib/lua/5.4/loadall.so"]
+        cpath += [f"{tree}/lib/lua/5.4/?.{library}", f"{tree}/lib/lua/5.4/loadall.{library}"]
     return ";".join(dict.fromkeys(path)), ";".join(dict.fromkeys(cpath))
 
 

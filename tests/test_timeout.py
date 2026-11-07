@@ -1,10 +1,9 @@
 """Timeouts kill the whole process tree on every platform (issue #2)."""
 
-import os
 import sys
 import time
-from pathlib import Path
 
+from host import alive
 from mutator.runner import CommandRunner
 
 SLEEPING_CHILD = (
@@ -16,11 +15,8 @@ SLEEPING_CHILD = (
 
 
 def _process_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    return True
+    # Not os.kill(pid, 0): on Windows that terminates the process it probes.
+    return alive(pid)
 
 
 def _dead(pid: int, grace: float = 5.0) -> bool:

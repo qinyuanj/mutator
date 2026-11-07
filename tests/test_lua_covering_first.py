@@ -6,7 +6,7 @@ import pytest
 
 from mutator.engine import _covering_first
 from mutator.model import Site
-from mutator.runner import _memory_limit
+from mutator.runner import _lua_memory_bytes, _memory_limit
 
 
 class Index:
@@ -28,6 +28,17 @@ def test_covering_specs_run_first_and_every_spec_still_runs():
 
 def test_uncovered_file_keeps_suite_order():
     assert _covering_first(Index(), Path("src/x.lua"), [site(9)]) == sorted(Index.specs)
+
+
+def test_the_memory_cap_is_sized_only_for_lua(monkeypatch):
+    # Shared by RLIMIT_AS on Linux and the job's per-process limit on Windows.
+    monkeypatch.delenv("MUTATOR_LUA_MEMORY_MB", raising=False)
+    assert _lua_memory_bytes(["env", "LUA_PATH=x", "/usr/bin/lua5.4", "-e", "x"]) == 2048 * 1024 * 1024
+    assert _lua_memory_bytes(["Lua.exe", "-e", "x"]) == 2048 * 1024 * 1024
+    assert _lua_memory_bytes([sys.executable, "-m", "pytest"]) is None
+    assert _lua_memory_bytes("lua5.4 -e x") is None
+    monkeypatch.setenv("MUTATOR_LUA_MEMORY_MB", "0")
+    assert _lua_memory_bytes(["lua5.4", "-e", "x"]) is None
 
 
 @pytest.mark.skipif(os.name != "posix", reason="RLIMIT_AS is POSIX")

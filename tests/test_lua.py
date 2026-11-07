@@ -1,8 +1,10 @@
+import os
 import shutil
 from pathlib import Path
 
 import pytest
 
+from host import WINDOWS
 from mutator.crapper_link import ensure_crapper
 from mutator.functions import is_private, sites_in_file
 from mutator.runner import CommandRunner
@@ -154,6 +156,9 @@ def _busted_script() -> tuple[Path, Path] | None:
     """
 
     roots = [Path.home() / ".luarocks", Path("/usr/local"), Path("/usr")]
+    if WINDOWS:
+        # LuaRocks' Windows user tree.
+        roots.insert(0, Path(os.environ.get("APPDATA", "")) / "luarocks")
     for root in roots:
         for script in sorted(root.glob("lib/luarocks/rocks-5.4/busted/*/bin/busted")):
             return script, root
@@ -176,6 +181,10 @@ def test_busted_runs_with_a_spaced_interpreter_path(tmp_path, monkeypatch, runne
     spaced = tmp_path / "lua tools" / "with space"
     spaced.mkdir(parents=True)
     shutil.copy(interpreter, spaced / interpreter.name)
+    if WINDOWS:
+        # A native Lua finds its runtime DLL beside the executable.
+        for library in interpreter.parent.glob("*.dll"):
+            shutil.copy(library, spaced / library.name)
     lua = spaced / interpreter.name
     assert " " in str(lua)
 
@@ -205,7 +214,7 @@ def test_busted_runs_with_a_spaced_interpreter_path(tmp_path, monkeypatch, runne
     monkeypatch.setenv(
         "LUA_PATH", f"{tree}/share/lua/5.4/?.lua;{tree}/share/lua/5.4/?/init.lua;;"
     )
-    monkeypatch.setenv("LUA_CPATH", f"{tree}/lib/lua/5.4/?.so;;")
+    monkeypatch.setenv("LUA_CPATH", f"{tree}/lib/lua/5.4/?.{'dll' if WINDOWS else 'so'};;")
     result = CommandRunner().run(command, directory, 60)
     assert result.code == 0, result.output
     assert "1 success" in result.output

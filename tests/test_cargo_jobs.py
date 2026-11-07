@@ -18,14 +18,18 @@ def _sites(count):
 def _run(tmp_path, workers):
     source = tmp_path / "calc.py"
     source.write_bytes(b"def add():\n    return 1\n")
-    log = tmp_path.parent / f"{tmp_path.name}-jobs.log"
-    command = (f'"{sys.executable}" -c "import os; '
-               f"open({str(log)!r}, 'a').write(os.environ.get('CARGO_BUILD_JOBS', '-') + '\\n')\"")
+    # One file per command: concurrent appends to one file can lose a line on
+    # Windows, where append mode seeks to the end and then writes.
+    log = tmp_path.parent / f"{tmp_path.name}-jobs"
+    log.mkdir()
+    command = (f'"{sys.executable}" -c "import os, uuid; '
+               f"open(os.path.join({str(log)!r}, uuid.uuid4().hex), 'w')"
+               f".write(os.environ.get('CARGO_BUILD_JOBS', '-'))\"")
     outcomes = {}
     run_mutants(tmp_path, source, source.read_bytes(), _sites(6), workers, CommandRunner(),
                 command, tmp_path, 10, "calc.py", outcomes)
     assert len(outcomes) == 6
-    return log.read_text(encoding="utf-8").split()
+    return [entry.read_text(encoding="utf-8") for entry in log.iterdir()]
 
 
 def test_each_worker_command_gets_its_share_of_the_cores(tmp_path, monkeypatch):

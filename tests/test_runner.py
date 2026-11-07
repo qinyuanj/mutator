@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from host import VENV_PYTHON, symlink_file
 from mutator.runner import CommandRunner, _clojure_command, _python_command, nearest
 from mutator.runner import test_plan as plan_command
 
@@ -57,19 +58,19 @@ def _executable(path):
 
 def test_python_command_uses_an_absolute_project_interpreter(tmp_path):
     project = tmp_path / "proj"
-    dot = project / ".venv" / "bin" / "python"
+    dot = project / ".venv" / VENV_PYTHON
     _executable(dot)
     (project / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
     assert _python_command(project) == [str(dot.absolute()), "-m", "pytest"]
 
     other = tmp_path / "other"
-    plain = other / "venv" / "bin" / "python"
+    plain = other / "venv" / VENV_PYTHON
     _executable(plain)
     assert _python_command(other) == [str(plain.absolute()), "-m", "unittest", "discover"]
 
-    _executable(other / ".venv" / "bin" / "python")
+    _executable(other / ".venv" / VENV_PYTHON)
     assert _python_command(other) == [
-        str((other / ".venv" / "bin" / "python").absolute()),
+        str((other / ".venv" / VENV_PYTHON).absolute()),
         "-m",
         "unittest",
         "discover",
@@ -80,9 +81,9 @@ def test_python_command_keeps_the_virtualenv_symlink(tmp_path):
     project = tmp_path / "proj"
     target = project / "real-python"
     _executable(target)
-    link = project / ".venv" / "bin" / "python"
+    link = project / ".venv" / VENV_PYTHON
     link.parent.mkdir(parents=True)
-    link.symlink_to(target)
+    symlink_file(link, target)
     (project / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
     assert _python_command(project) == [str(link.absolute()), "-m", "pytest"]
 
@@ -151,7 +152,7 @@ def test_a_baseline_run_uses_a_dependency_installed_only_in_the_project_venv(tmp
     )
     if created.returncode != 0:
         pytest.skip(f"python -m venv failed: {created.stderr.strip()}")
-    interpreter = project / ".venv" / "bin" / "python"
+    interpreter = project / ".venv" / VENV_PYTHON
     located = subprocess.run(
         [str(interpreter), "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
         capture_output=True,
@@ -317,6 +318,7 @@ def test_plans_prefer_markers_in_a_fixed_order_over_nearness(tmp_path):
     assert plan_command(root, clj, "clojure", None) == (["clj", "-M:test"], root)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="process-group signals are POSIX; Windows uses a job")
 def test_a_timeout_survives_a_process_group_that_cannot_be_signalled(tmp_path, monkeypatch):
     def refuse(pid, sig):
         raise PermissionError(1, "Operation not permitted")
