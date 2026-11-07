@@ -324,7 +324,9 @@ def test_a_timeout_survives_a_process_group_that_cannot_be_signalled(tmp_path, m
         raise PermissionError(1, "Operation not permitted")
 
     monkeypatch.setattr("mutator.runner.os.killpg", refuse)
-    result = CommandRunner().run(f"{sys.executable} -c 'import time; time.sleep(30)'", tmp_path, 0.5)
+    # An argv, so the leader is the sleeper itself: a shell that does not exec
+    # its last command (dash here) would leave it holding the output pipe.
+    result = CommandRunner().run([sys.executable, "-c", "import time; time.sleep(30)"], tmp_path, 0.5)
     assert (result.code, result.timed_out) == (124, True)
     assert result.seconds < 10
 

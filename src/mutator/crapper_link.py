@@ -21,6 +21,7 @@ _NEEDS = {
     "runners": ("stale_files",),
     # Added with native Windows (crapper#10).
     "atomic": ("write_bytes",),
+    "platform": ("run", "resolve", "replace"),
 }
 
 
@@ -36,6 +37,11 @@ def _missing(crapper) -> list[str]:
 def ensure_crapper():
     try:
         import crapper
+        if getattr(crapper, "__file__", None) is None:
+            # A cwd containing the crapper checkout can import that directory
+            # as a namespace package; the actual package lives in its src/.
+            sys.modules.pop("crapper", None)
+            raise ImportError("crapper is a checkout directory, not its package")
     except ImportError:
         sibling = _sibling_src()
         if not (sibling / "crapper").is_dir():

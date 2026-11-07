@@ -59,6 +59,19 @@ def test_a_child_left_by_a_passing_command_is_reaped(tmp_path):
     assert _gone_soon(child), f"child {child} outlived the command"
 
 
+@pytest.mark.skipif(not WINDOWS, reason="Windows job completion must not wait for an inherited pipe")
+def test_a_child_holding_stdout_dies_when_its_leader_exits(tmp_path):
+    pidfile = tmp_path / "child.pid"
+    script = tmp_path / "leave.py"
+    script.write_text(LEAVE.replace("stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL", "stdout=None, stderr=None"),
+                      encoding="utf-8")
+    result = CommandRunner().run([sys.executable, str(script), str(pidfile), "3"], tmp_path, 10)
+    assert result.code == 3 and not result.timed_out
+    assert result.seconds < 5
+    assert "done" in result.output
+    assert _gone_soon(int(pidfile.read_text()))
+
+
 def test_a_failing_command_keeps_its_code_and_loses_its_child(tmp_path):
     result, child = _left_behind(tmp_path, 3)
     assert result.code == 3

@@ -69,11 +69,47 @@ def test_writes_to_the_project_home_and_temp_reach_neither_the_user_nor_a_later_
     assert not list((project / "target" / "mutation-workers").glob("run-*"))
 
 
+@pytest.mark.skipif(not WINDOWS, reason="only native Windows redirects command homes")
+def test_the_baseline_also_writes_into_a_private_home(tmp_path, monkeypatch):
+    real_home = tmp_path / "real-home"
+    real_home.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    for name in ("HOME", "USERPROFILE", "TEMP", "TMP", "APPDATA", "LOCALAPPDATA"):
+        monkeypatch.setenv(name, str(real_home))
+    script = ("import os; from pathlib import Path; "
+              "[Path(os.environ[k], 'leak').write_text('x') for k in "
+              "('HOME', 'USERPROFILE', 'TEMP', 'TMP', 'APPDATA', 'LOCALAPPDATA')]")
+    result = CommandRunner().run([sys.executable, "-c", script], project, 30)
+    assert result.code == 0, result.output
+    assert not list(real_home.iterdir())
+    assert not list(project.rglob("leak"))
+    assert not list((project / "target" / "mutation-homes").iterdir())
+
+
+@pytest.mark.skipif(not WINDOWS, reason="the fixture deliberately calls a native Win32 API")
+def test_cli_tests_windows_api_code_in_native_workers(tmp_path):
+    from host import shell_command
+    from mutator.cli import run
+
+    source = tmp_path / "native.py"
+    source.write_bytes(b"import ctypes\ndef next_pid():\n    return ctypes.windll.kernel32.GetCurrentProcessId() + 1\n")
+    command = shell_command([sys.executable, "-c", "import os; from native import next_pid; assert next_pid() == os.getpid() + 1"])
+    assert run(["--root", str(tmp_path), "--no-coverage", "--mutate-all", "--max-workers", "1",
+                "--test-command", command, str(source)]) == 0
+    data = (tmp_path / ".metrics" / "mutate" / "native.edn").read_bytes()
+    assert b":isolation :copy" in data
+    assert b":survived 0" in data
+
+
 def test_the_copier_is_a_parameter_so_another_hosts_clone_call_plugs_in(tmp_path):
     project = tmp_path / "project"
     project.mkdir()
     _project(project)
     (project / "notes.txt").write_text("notes")
+    (project / "node_modules").mkdir()
+    dependency = project / "node_modules" / "library.js"
+    dependency.write_text("original dependency")
     (project / "build").mkdir()
     (project / "build" / "stale.txt").write_text("stale")
     copied = []
@@ -88,9 +124,11 @@ def test_the_copier_is_a_parameter_so_another_hosts_clone_call_plugs_in(tmp_path
     with views.view(worker, project, "pkg/value.py", b"value = 2\n"):
         assert (worker / "pkg" / "value.py").read_bytes() == b"value = 2\n"
         assert (worker / "notes.txt").read_text() == "notes"
+        (worker / "node_modules" / "library.js").write_text("mutant write")
+        assert dependency.read_text() == "original dependency"
         # Build output is hidden as in an overlay view.
         assert (worker / "build").is_dir() and not any((worker / "build").iterdir())
-    assert sorted(copied) == ["notes.txt", "value.py"]
+    assert sorted(copied) == ["library.js", "notes.txt", "value.py"]
     assert not any(worker.iterdir())
 
 

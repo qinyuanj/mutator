@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import sys
 from pathlib import Path
 
 import pytest
@@ -71,6 +72,13 @@ def toolchain(monkeypatch):
     )
     if probe.code != 0:
         pytest.skip(f"Busted/LuaCov/cluacov toolchain unavailable: {probe.output}")
+    # Runs that start a bare interpreter (the collector profile) search the
+    # same trees as the probe; Lua's defaults would miss a user tree's dkjson.
+    found = [tree.as_posix() for tree in trees if tree.is_dir()]
+    if found:
+        library = "dll" if sys.platform == "win32" else "so"
+        monkeypatch.setenv("LUA_PATH", ";".join(f"{tree}/share/lua/5.4/?.lua" for tree in found) + ";;")
+        monkeypatch.setenv("LUA_CPATH", ";".join(f"{tree}/lib/lua/5.4/?.{library}" for tree in found) + ";;")
     return runners
 
 

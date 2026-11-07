@@ -18,8 +18,6 @@ from mutator import isolation
 from mutator.crapper_link import ensure_crapper
 
 WINDOWS = sys.platform == "win32"
-if WINDOWS:
-    from mutator import winjob
 
 Command = str | list[str]
 
@@ -340,15 +338,21 @@ def _group_resident(group: int) -> int:
 def _join_within(reader: threading.Thread, process, timeout, cap) -> bool:
     """Join the reader until the timeout; False when the group passed the cap."""
 
-    if cap is None:
+    job = getattr(process, "mutator_job", None)
+    if job is None and cap is None:
         reader.join(timeout)
         return True
-    deadline = time.monotonic() + timeout
-    while reader.is_alive() and time.monotonic() < deadline:
-        job = getattr(process, "mutator_job", None)
-        if (job.resident() if job is not None else _group_resident(process.pid)) > cap:
+    deadline = None if timeout is None else time.monotonic() + timeout
+    while reader.is_alive() and (deadline is None or time.monotonic() < deadline):
+        if job is not None and process.poll() is not None:
+            # Leftovers may have inherited stdout. End them when the leader
+            # exits so their pipe handles cannot turn success into a timeout.
+            job.terminate()
+            reader.join()
+            return True
+        if cap is not None and (job.resident() if job is not None else _group_resident(process.pid)) > cap:
             return False
-        reader.join(min(0.2, max(0.0, deadline - time.monotonic())))
+        reader.join(0.2 if deadline is None else min(0.2, max(0.0, deadline - time.monotonic())))
     return True
 
 
@@ -375,8 +379,7 @@ def _redirect_worker_home(cwd: Path, environment: dict) -> None:
     """Point a view's command at the view's own home, temp and app data."""
 
     worker = _worker_home(cwd.resolve())
-    if worker is not None:
-        isolation.current().redirect(worker, environment)
+    isolation.current().redirect(worker or cwd, environment)
 
 
 def _windows_argv(command: list[str], environment: dict) -> list[str]:
@@ -398,11 +401,7 @@ def _windows_argv(command: list[str], environment: dict) -> list[str]:
         command = command[index:]
     if command == ["false"]:
         return [sys.executable, "-c", "raise SystemExit(1)"]
-    if command and not os.path.dirname(command[0]):
-        found = shutil.which(command[0], path=environment.get("PATH"))
-        if found:
-            return [found, *command[1:]]
-    return command
+    return ensure_crapper().platform.resolve(command)
 
 
 def _launch(command: Command, cwd: Path, environment: dict) -> subprocess.Popen:
@@ -427,6 +426,8 @@ def _launch(command: Command, cwd: Path, environment: dict) -> subprocess.Popen:
     if not WINDOWS:
         return subprocess.Popen(command, start_new_session=True,
                                 preexec_fn=_memory_limit(command), **options)
+    from mutator import winjob
+
     limit = _lua_memory_bytes(command)
     if isinstance(command, list):
         command = _windows_argv(command, environment)
@@ -457,6 +458,11 @@ class CommandRunner:
         self.workers = 1
 
     def run(self, command: Command, cwd: Path, timeout: float | None) -> CommandResult:
+        location = _worker_home(cwd.resolve()) or cwd
+        with isolation.current().command_home(location):
+            return self._run(command, cwd, timeout)
+
+    def _run(self, command: Command, cwd: Path, timeout: float | None) -> CommandResult:
         """Run `command` in `cwd`.
 
         A list is an argument vector and does not go through a shell, so a
@@ -721,9 +727,9 @@ def _rocks_trees() -> list[str]:
         result = None
         if exe:
             try:
-                result = subprocess.run(
+                result = ensure_crapper().platform.run(
                     [exe, "--lua-version", "5.4", "config", "rocks_trees"],
-                    capture_output=True, text=True, timeout=30,
+                    Path.cwd(), capture=True,
                 )
             except (OSError, subprocess.TimeoutExpired):
                 result = None

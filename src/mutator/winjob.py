@@ -9,44 +9,21 @@ was killed itself. (docs/adr/0007-windows-workers-run-in-copies.md)
 from __future__ import annotations
 
 import ctypes
-import subprocess
 from ctypes import wintypes
+
+from mutator.crapper_link import ensure_crapper
+
+_platform = ensure_crapper().platform
 
 CREATE_SUSPENDED = 0x00000004
 CREATE_NEW_PROCESS_GROUP = 0x00000200
 
 _JOB_OBJECT_LIMIT_PROCESS_MEMORY = 0x00000100
-_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 _BASIC_ACCOUNTING = 1
 _BASIC_PROCESS_ID_LIST = 3
 _EXTENDED_LIMIT = 9
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _PROCESS_VM_READ = 0x0010
-
-
-class _BasicLimit(ctypes.Structure):
-    _fields_ = [
-        ("PerProcessUserTimeLimit", ctypes.c_int64),
-        ("PerJobUserTimeLimit", ctypes.c_int64),
-        ("LimitFlags", wintypes.DWORD),
-        ("MinimumWorkingSetSize", ctypes.c_size_t),
-        ("MaximumWorkingSetSize", ctypes.c_size_t),
-        ("ActiveProcessLimit", wintypes.DWORD),
-        ("Affinity", ctypes.c_size_t),
-        ("PriorityClass", wintypes.DWORD),
-        ("SchedulingClass", wintypes.DWORD),
-    ]
-
-
-class _ExtendedLimit(ctypes.Structure):
-    _fields_ = [
-        ("BasicLimitInformation", _BasicLimit),
-        ("IoInfo", ctypes.c_uint64 * 6),
-        ("ProcessMemoryLimit", ctypes.c_size_t),
-        ("JobMemoryLimit", ctypes.c_size_t),
-        ("PeakProcessMemoryUsed", ctypes.c_size_t),
-        ("PeakJobMemoryUsed", ctypes.c_size_t),
-    ]
 
 
 class _Accounting(ctypes.Structure):
@@ -77,53 +54,31 @@ class _MemoryCounters(ctypes.Structure):
     ]
 
 
-_kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-_kernel32.CreateJobObjectW.restype = wintypes.HANDLE
-_kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
-_kernel32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
-_kernel32.QueryInformationJobObject.argtypes = [
-    wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p]
-_kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
-_kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
-_kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-_kernel32.OpenProcess.restype = wintypes.HANDLE
-_kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-_kernel32.K32GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD]
-_ntdll = ctypes.WinDLL("ntdll")
-_ntdll.NtResumeProcess.argtypes = [wintypes.HANDLE]
+class Job(_platform._Job):
+    """crapper's job, with memory limits and accounting for mutation runs.
 
-
-class Job:
-    """A kill-on-close job, optionally capping each process's committed memory."""
+    crapper owns the race-free suspended adoption, kill-on-close setup and
+    handle lifecycle. Mutation runs additionally need a Lua memory cap and
+    job accounting to enforce a Rust resident cap while output is read.
+    """
 
     def __init__(self, process_memory: int | None = None):
-        self._handle = _kernel32.CreateJobObjectW(None, None)
-        if not self._handle:
-            raise ctypes.WinError(ctypes.get_last_error())
-        info = _ExtendedLimit()
-        info.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        super().__init__()
+        kernel32 = self._kernel32
+        kernel32.QueryInformationJobObject.argtypes = [
+            wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.K32GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD]
         if process_memory:
+            info = _platform._limit_information()
             info.BasicLimitInformation.LimitFlags |= _JOB_OBJECT_LIMIT_PROCESS_MEMORY
             info.ProcessMemoryLimit = process_memory
-        if not _kernel32.SetInformationJobObject(
-                self._handle, _EXTENDED_LIMIT, ctypes.byref(info), ctypes.sizeof(info)):
-            error = ctypes.WinError(ctypes.get_last_error())
-            self.close()
-            raise error
-
-    def adopt(self, process: subprocess.Popen) -> None:
-        """Put a process started suspended in the job, then resume it."""
-
-        handle = int(process._handle)  # Popen has no public accessor for it.
-        if not _kernel32.AssignProcessToJobObject(self._handle, handle):
-            raise ctypes.WinError(ctypes.get_last_error())
-        # Popen closed the primary thread handle; resume through the process.
-        if _ntdll.NtResumeProcess(handle) != 0:
-            raise OSError("cannot resume the test process")
-
-    def terminate(self, code: int = 1) -> None:
-        if self._handle:
-            _kernel32.TerminateJobObject(self._handle, code)
+            if not kernel32.SetInformationJobObject(
+                    self._handle, _EXTENDED_LIMIT, ctypes.byref(info), ctypes.sizeof(info)):
+                error = ctypes.WinError(ctypes.get_last_error())
+                self.close()
+                raise error
 
     def active(self) -> int:
         """Processes still running in the job."""
@@ -131,44 +86,39 @@ class Job:
         if not self._handle:
             return 0
         info = _Accounting()
-        if not _kernel32.QueryInformationJobObject(
+        if not self._kernel32.QueryInformationJobObject(
                 self._handle, _BASIC_ACCOUNTING, ctypes.byref(info), ctypes.sizeof(info), None):
             return 0
         return info.ActiveProcesses
 
     def _pids(self) -> list[int]:
         capacity = 256
+        while True:
+            class _List(ctypes.Structure):
+                _fields_ = [("Assigned", wintypes.DWORD), ("Listed", wintypes.DWORD),
+                            ("Ids", ctypes.c_size_t * capacity)]
 
-        class _List(ctypes.Structure):
-            _fields_ = [("Assigned", wintypes.DWORD), ("Listed", wintypes.DWORD),
-                        ("Ids", ctypes.c_size_t * capacity)]
-
-        listing = _List()
-        if not _kernel32.QueryInformationJobObject(
-                self._handle, _BASIC_PROCESS_ID_LIST, ctypes.byref(listing), ctypes.sizeof(listing), None):
-            return []
-        return list(listing.Ids[:listing.Listed])
+            listing = _List()
+            if self._kernel32.QueryInformationJobObject(
+                    self._handle, _BASIC_PROCESS_ID_LIST, ctypes.byref(listing), ctypes.sizeof(listing), None):
+                return list(listing.Ids[:listing.Listed])
+            if ctypes.get_last_error() != 234:  # ERROR_MORE_DATA: the job grew.
+                raise ctypes.WinError(ctypes.get_last_error())
+            capacity = max(capacity * 2, listing.Assigned)
 
     def resident(self) -> int:
         """Working-set bytes of every process in the job."""
 
         total = 0
         for pid in self._pids() if self._handle else []:
-            handle = _kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION | _PROCESS_VM_READ, False, pid)
+            handle = self._kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION | _PROCESS_VM_READ, False, pid)
             if not handle:
                 continue
             try:
                 counters = _MemoryCounters()
                 counters.cb = ctypes.sizeof(counters)
-                if _kernel32.K32GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
+                if self._kernel32.K32GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
                     total += counters.WorkingSetSize
             finally:
-                _kernel32.CloseHandle(handle)
+                self._kernel32.CloseHandle(handle)
         return total
-
-    def close(self) -> None:
-        """Close the job; whatever still runs in it is ended."""
-
-        if self._handle:
-            _kernel32.CloseHandle(self._handle)
-            self._handle = None

@@ -651,23 +651,26 @@ def _polled(work) -> int:
     """
 
     outcome: list = []
+    finished = threading.Event()
 
     def target() -> None:
         try:
             outcome.append(("value", work()))
         except BaseException as exc:  # Re-raised on the main thread.
             outcome.append(("error", exc))
+        finally:
+            finished.set()
 
     thread = threading.Thread(target=target, name="mutator-run", daemon=True)
     thread.start()
     try:
-        while thread.is_alive():
-            thread.join(0.2)
+        while not finished.wait(0.2):
+            pass
     except Interrupted:
-        # Later interrupts return without raising (_interrupt), so this
-        # wait ends only when the run thread has removed its own views.
-        while thread.is_alive():
-            thread.join(0.2)
+        # An interrupted Thread.join on CPython can mark a still-running
+        # thread dead (bpo-45274). Wait for its explicit completion instead.
+        while not finished.wait(0.2):
+            pass
         raise
     kind, value = outcome[0]
     if kind == "error":
@@ -682,8 +685,10 @@ def _interruptible(work) -> int:
     commands return. Files whose mutants did not all finish get no snapshot.
     """
 
+    global _stopping
     if threading.current_thread() is not threading.main_thread():
         return work()
+    _stopping = False
     previous = {signum: signal.signal(signum, _interrupt) for signum in _STOP_SIGNALS}
     try:
         return _polled(work) if sys.platform == "win32" else work()
@@ -742,6 +747,7 @@ def run(argv: list[str] | None = None) -> int:
         else:
             print("No mutations selected; keeping the previous snapshots.")
             print(format_decisions(reused, verbose=options.verbose), end="")
+            print(f"Isolation: {isolation.current().describe(root)}")
             return 0
     timings.reset()
     with timings.measure("coverage"):
@@ -760,4 +766,8 @@ def run(argv: list[str] | None = None) -> int:
 
 
 def main(argv: list[str] | None = None) -> None:
+    try:
+        ensure_crapper().platform.lf_streams()
+    except ImportError:
+        pass  # run() reports the missing dependency with its normal status.
     sys.exit(run(argv))

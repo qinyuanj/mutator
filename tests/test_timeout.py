@@ -31,7 +31,9 @@ def _dead(pid: int, grace: float = 5.0) -> bool:
 def test_a_timeout_returns_the_result_with_partial_output(tmp_path):
     marker = "partial-before-sleep"
     command = f'"{sys.executable}" -c "import time; print({marker!r}, flush=True); time.sleep(60)"'
-    result = CommandRunner().run(command, tmp_path, 1.0)
+    # Allow interpreter startup on a busy native Windows host; this still
+    # kills the 60-second sleeper and must retain what it printed first.
+    result = CommandRunner().run(command, tmp_path, 5.0)
     assert result.timed_out is True
     assert result.code == 124
     assert marker in result.output

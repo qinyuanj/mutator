@@ -23,6 +23,7 @@ import shutil
 import stat
 import sys
 import tempfile
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -255,6 +256,11 @@ class NamespaceViews:
             unmount(worker)
             self._mounted.discard(worker)
 
+    @contextmanager
+    def command_home(self, location: Path):
+        """Linux command environments retain the existing home semantics."""
+        yield
+
     def redirect(self, worker: Path, environment: dict) -> None:
         """Nothing to redirect: a view's writes stay in its writable layer."""
 
@@ -348,14 +354,15 @@ def _key(worker: Path) -> str:
     return os.path.normcase(os.path.realpath(worker))
 
 
-def _copy_tree(source: Path, destination: Path, skip: set[Path], copy_file) -> None:
+def _copy_tree(source: Path, destination: Path, skip: set[Path], copy_file, project: Path | None = None) -> None:
     """Copy ``source`` to ``destination`` the way a view shows it.
 
     ``skip`` (hidden build output) becomes an empty directory. Links are
-    recreated, never followed. ``node_modules`` is linked to the project's
-    installed copy, as a virtualenv is used in place.
+    recreated, never followed. Installed node_modules is copied too: linking
+    it back to the checkout would let a mutant change project files.
     """
 
+    project = source.resolve() if project is None else project
     destination.mkdir()
     with os.scandir(source) as entries:
         for entry in entries:
@@ -363,19 +370,24 @@ def _copy_tree(source: Path, destination: Path, skip: set[Path], copy_file) -> N
             if path in skip:
                 target.mkdir()
             elif entry.is_symlink() or _is_junction(path):
+                # Absolute project links and junctions would bypass the copy.
+                # Refuse them before starting the command rather than expose
+                # the checkout. Relative file links stay inside the copy.
+                if path.resolve().is_relative_to(project) and (
+                        path.is_dir() or os.path.isabs(os.readlink(path))):
+                    raise IsolationUnavailable(f"Copy isolation cannot freeze linked project path: {path}")
                 _relink(path, target)
             elif entry.is_dir():
-                if entry.name == "node_modules":
-                    _link_directory(Path(os.path.realpath(path)), target)
-                else:
-                    _copy_tree(path, target, skip, copy_file)
+                _copy_tree(path, target, skip, copy_file, project)
             elif entry.is_file():
                 copy_file(path, target)
 
 
 def _is_junction(path: Path) -> bool:
-    # Path.is_junction is Python 3.12+; there are no junctions off Windows.
-    return getattr(path, "is_junction", lambda: False)()
+    # Path.is_junction is Python 3.12+; use reparse metadata on 3.11.
+    if hasattr(path, "is_junction"):
+        return path.is_junction()
+    return WINDOWS and is_link(path) and not path.is_symlink() and path.is_dir()
 
 
 def _link_directory(real: Path, target: Path) -> None:
@@ -422,10 +434,12 @@ class CopyViews:
         self._homes: dict[str, Path] = {}
         self._active: set[Path] = set()
         self._runs: dict[Path, int] = {}
+        self._command = threading.local()
 
     def describe(self, root: Path) -> str:
         filesystem, flags = volume(root) if WINDOWS else ("", 0)
-        build = sys.getwindowsversion().build if WINDOWS else None
+        # Python 3.11's copy2 does not call CopyFile2; it always copies bytes.
+        build = sys.getwindowsversion().build if WINDOWS and sys.version_info >= (3, 12) else None
         method = copy_method(filesystem, flags, build)
         on = f" on {filesystem}" if filesystem else ""
         return f"copy (a fresh {method} of the project per command{on})"
@@ -467,10 +481,33 @@ class CopyViews:
             # Empty again between views, like a mount point after unmount.
             worker.mkdir(parents=True, exist_ok=True)
 
-    def redirect(self, worker: Path, environment: dict) -> None:
-        """Point home, profile, temp and app-data of a view's command beside it."""
+    @contextmanager
+    def command_home(self, location: Path):
+        """Redirect the baseline too, while worker commands use their view's home.
 
-        home = self._homes.get(_key(worker))
+        The baseline runs outside a view; its home still belongs to this
+        command, under hidden target output. Thread-local binding lets
+        concurrent commands at the same cwd have independent homes.
+        """
+        if _key(location) in self._homes:
+            yield
+            return
+        parent = location / "target" / "mutation-homes"
+        parent.mkdir(parents=True, exist_ok=True)
+        home = Path(tempfile.mkdtemp(prefix="home-", dir=parent))
+        self._command.home = home
+        try:
+            for folder in set(_REDIRECTED.values()):
+                (home / folder).mkdir(parents=True, exist_ok=True)
+            yield
+        finally:
+            self._command.home = None
+            delete_tree(home)
+
+    def redirect(self, worker: Path, environment: dict) -> None:
+        """Point home, profile, temp and app-data of a command into its home."""
+
+        home = self._homes.get(_key(worker)) or getattr(self._command, "home", None)
         if home is None:
             return
         environment.update(_toolchain_homes(environment))
