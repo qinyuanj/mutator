@@ -1,0 +1,3 @@
+*.edn text eol=lf
+tests/fixtures/** text eol=lf
+*.cmd text eol=crlf

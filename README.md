@@ -47,7 +47,7 @@ Mutants of one file run at the same time. The default is one worker per core. `-
 
 Each worker is a directory under `target/mutation-workers`. Lua schedules
 previous survivors first within each file to reduce a long final tail; history
-changes execution order only. Every pristine check and every mutant runs in its own overlay view mounted at the worker: the whole project tree, read-only underneath, with the file being mutated written on top and build output such as `target/`, `.git/` and `.venv/` hidden. Whatever a test writes, next to its working directory or anywhere else in the project, lands in that view and is discarded with it: it reaches neither the project nor the next mutant. Imports and paths resolve inside the view, so Node and Cargo see the mutant without any copying. Workers are removed after success, setup failure, or runtime failure. See [ADR 0006](docs/adr/0006-mutants-run-in-overlay-views.md).
+changes execution order only. On Linux, every pristine check and every mutant runs in its own overlay view mounted at the worker: the whole project tree, read-only underneath, with the file being mutated written on top and build output such as `target/`, `.git/` and `.venv/` hidden. Whatever a test writes, next to its working directory or anywhere else in the project, lands in that view and is discarded with it: it reaches neither the project nor the next mutant. Imports and paths resolve inside the view, so Node and Cargo see the mutant without any copying. Workers are removed after success, setup failure, or runtime failure. See [ADR 0006](docs/adr/0006-mutants-run-in-overlay-views.md).
 
 The views need unprivileged user namespaces. mutator enters its own user and mount namespace at startup; mounts never leave it. When the system refuses one, mutator exits with status 1 and says how to allow them (on Ubuntu 23.10 and later, `sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0`).
 
@@ -260,8 +260,8 @@ Running crapper and then mutator does not run the coverage suite twice. Before i
 
 ## WSL2
 
-Native Windows is not supported: mutator exits with status 1 and points at
-this section. Run it inside WSL2 with Ubuntu.
+WSL2 with Ubuntu remains supported, with Linux namespace isolation. For
+native Windows setup and its declared copy isolation, see below.
 
 1. In an administrator PowerShell, run `wsl --install` and reboot.
 2. Open Ubuntu and clone into the Linux home directory, not `/mnt/c`.
@@ -283,6 +283,55 @@ Custom `--test-command` strings run through `/bin/sh`. The runner returns the
 test process's status, while the mutation CLI returns its aggregate statuses
 (`0`, `2`, or `3`) described above. A timed-out test command is killed by
 process group, which cleans up its descendants.
+
+## Native Windows
+
+Windows 11 and Windows 10 22H2 (build 19045) or later are supported. Install
+Python 3.12+ (for CopyFile2 copies), git, and your project's native toolchain:
+Rust MSVC for `cfg(windows)` tests, Node/npm for TypeScript, Go, or Python.
+Keep a current crapper checkout beside mutator; crapper#10 supplies its
+Windows process and atomic-write support. From cmd or PowerShell:
+
+```text
+python -m venv .venv
+.venv\Scripts\python -m pip install -e ".[dev]"
+.venv\Scripts\mutator.exe --root "C:\projects\my project" --no-coverage
+```
+
+The installed `mutator.exe` console entry works in either shell. User
+`--test-command` and `--coverage-command` strings use **cmd.exe** on Windows
+(`/bin/sh` on Linux); quote paths for that shell. Generated commands resolve
+executables through PATHEXT, so npm.cmd and mvn.cmd are found. Their arguments
+are still subject to the launcher's cmd.exe parsing. Windows Clojure CLI
+installed solely as a PowerShell module needs a custom command.
+
+Windows runs with **copy isolation**: a fresh copy of the project per pristine
+check and mutant, removed after the command. It uses the Linux views' hidden
+build-output paths and copies node_modules too. Home, user profile, temp,
+APPDATA and LOCALAPPDATA are redirected beside each worker, with installed
+toolchain locations pinned first. Every command belongs to a kill-on-close
+Job Object before it starts, so descendants end after success, failure,
+timeout or interrupt. Ctrl+C and Ctrl+Break stop the run and remove copies;
+a hard-killed run's abandoned copies are swept on the next mutation run.
+Concurrent Rust runs hold different slot locks and keep separate slot targets.
+
+The summary reports `Isolation: copy` and the copy method/volume; snapshots
+carry `:isolation :copy`. Linux reports namespace views and writes
+`:isolation :namespace-view`. Snapshot paths stay POSIX-relative and bytes
+use UTF-8 LF on both hosts. On a ReFS Dev Drive with block refcounting on
+Windows 11 24H2+, Python's CopyFile2 automatically block-clones. Keep the
+project and its target directory on that volume. NTFS and older builds make
+full copies with the same results, at a higher cost for large dependencies.
+
+Copy isolation has no OS enforcement against **absolute paths outside the
+copy, external links, pinned toolchain stores, registry or network**. Tests
+must be trusted. Project symlinks are recreated without copying through them;
+Developer Mode enables symlink creation without elevation. Without that
+privilege, directory links use junctions and file links become copies. Native
+Lua distributions may not open non-ANSI paths. See
+[ADR 0007](docs/adr/0007-windows-workers-run-in-copies.md), which partially
+supersedes [ADR 0006](docs/adr/0006-mutants-run-in-overlay-views.md) for Windows.
+Linux still refuses to run when user namespaces are unavailable.
 
 ## Development
 

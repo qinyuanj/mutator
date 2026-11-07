@@ -1,5 +1,8 @@
 # Mutants run in overlay views
 
+Partially superseded for native Windows by [ADR 0007](0007-windows-workers-run-in-copies.md).
+This decision remains in force on Linux.
+
 A worker used to be a symlink overlay: real directories on the path to the
 source under test, every sibling a link into the project. A test that wrote a
 file left it behind (issue #25). In a real directory of the overlay it failed

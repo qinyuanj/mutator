@@ -30,7 +30,7 @@ Spec files whose test behavior is unaffected by the presence, absence, or execut
 A run of a mutant's exact test command inside an unmutated worker before that command executes against mutated source. With the shared Lua worker pool and with Rust worker slots, each distinct command is checked once per run, since every worker's view is built from the same layers; `--paranoid-workers` restores one check per worker.
 
 **worker view**:
-A fresh overlay of the project tree, mounted at a worker for one pristine check or one mutant and discarded after it. It holds the source under test; whatever its command writes stays in it.
+A fresh instance of the project tree for one pristine check or one mutant, discarded after it. It holds the source under test; writes within the tree reach neither the project nor the next mutant.
 
 **full-suite confirmation**:
 A second execution of a tentatively surviving mutant against the complete test scope. It establishes survival in that scope and does not establish independence between spec files.
