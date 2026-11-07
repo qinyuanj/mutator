@@ -14,7 +14,8 @@ from mutator.engine import StaleBackupsError, mutate_file, mutate_queued, restor
 from mutator.report import format_decisions, format_results, format_site_log
 from mutator.runner import CommandRunner, Interrupted, stop_commands
 from mutator import timings
-from mutator import sandbox
+from mutator import isolation
+from mutator.isolation import IsolationUnavailable
 from mutator.workers import WorkerPool, WorkerSlots, discard_overlays
 
 HELP = """\
@@ -585,22 +586,35 @@ def _mutate_files(options: Options, root: Path, files: list[Path], indexes: dict
     if forms:
         print(format_results(forms), end="")
     print(format_decisions(published, verbose=options.verbose), end="")
+    # Never silent about which isolation the mutants ran in (ADR 0007).
+    print(f"Isolation: {isolation.current().describe(root)}")
     for path in written:
         print(f"Wrote {path}", file=sys.stderr)
     return _finish(baseline_failed, changed, survived)
 
 
-UNSUPPORTED_PLATFORM = (
-    "mutator does not support native Windows. Run it inside WSL2 with the "
-    "project under ~/; see the README."
-)
+# Windows 10 22H2. Older builds are refused before any work.
+MINIMUM_WINDOWS_BUILD = 19045
+
+
+def _windows_build() -> int | None:
+    return sys.getwindowsversion().build if sys.platform == "win32" else None
+
+
+def windows_refusal(platform: str, build: int | None) -> str | None:
+    """Why mutator will not run on this Windows build, or None when it will."""
+
+    if platform != "win32" or build is None or build >= MINIMUM_WINDOWS_BUILD:
+        return None
+    return (
+        f"mutator needs Windows 10 22H2 (build {MINIMUM_WINDOWS_BUILD}) or later; "
+        f"this is build {build}. Update Windows, or run mutator inside WSL2."
+    )
 
 
 def platform_warning(platform: str, root: Path) -> str | None:
-    """Refuse native Windows; warn about slow Windows mounts under WSL."""
+    """Warn about slow Windows mounts under WSL."""
 
-    if platform == "win32":
-        return UNSUPPORTED_PLATFORM
     if root.as_posix().startswith("/mnt/"):
         return (
             f"{root} is on a Windows drive. Under WSL2, clone the project under ~/ "
@@ -609,12 +623,56 @@ def platform_warning(platform: str, root: Path) -> str | None:
     return None
 
 
-_STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT)
+# Ctrl+Break arrives as SIGBREAK on Windows, where SIGTERM never arrives.
+_STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, *([signal.SIGBREAK] if hasattr(signal, "SIGBREAK") else []))
+
+
+_stopping = False
 
 
 def _interrupt(signum, _frame) -> None:
+    global _stopping
+    if _stopping and sys.platform == "win32":
+        # A repeated Ctrl+Break while the run thread unwinds: it must not
+        # pull the main thread into cleanup before that thread has finished.
+        return
+    _stopping = True
     stop_commands(signum)
     raise Interrupted(signum)
+
+
+def _polled(work) -> int:
+    """Run ``work`` on a thread while the main thread waits in short steps.
+
+    On Windows a main thread blocked in a lock wait (a future's result, a
+    thread join) runs no signal handler until the wait ends. After an
+    interrupt the work still unwinds on its thread: its commands are killed
+    and raise Interrupted there.
+    """
+
+    outcome: list = []
+
+    def target() -> None:
+        try:
+            outcome.append(("value", work()))
+        except BaseException as exc:  # Re-raised on the main thread.
+            outcome.append(("error", exc))
+
+    thread = threading.Thread(target=target, name="mutator-run", daemon=True)
+    thread.start()
+    try:
+        while thread.is_alive():
+            thread.join(0.2)
+    except Interrupted:
+        # Later interrupts return without raising (_interrupt), so this
+        # wait ends only when the run thread has removed its own views.
+        while thread.is_alive():
+            thread.join(0.2)
+        raise
+    kind, value = outcome[0]
+    if kind == "error":
+        raise value
+    return value
 
 
 def _interruptible(work) -> int:
@@ -628,7 +686,7 @@ def _interruptible(work) -> int:
         return work()
     previous = {signum: signal.signal(signum, _interrupt) for signum in _STOP_SIGNALS}
     try:
-        return work()
+        return _polled(work) if sys.platform == "win32" else work()
     except Interrupted as stop:
         for signum in _STOP_SIGNALS:
             signal.signal(signum, signal.SIG_IGN)
@@ -650,14 +708,17 @@ def run(argv: list[str] | None = None) -> int:
         print(missing, file=sys.stderr)
         return 2
     root = options.project_root.resolve()
+    refusal = windows_refusal(sys.platform, _windows_build())
+    if refusal:
+        print(refusal, file=sys.stderr)
+        return 1
     warning = platform_warning(sys.platform, root)
     if warning:
         print(warning, file=sys.stderr)
-    if sys.platform == "win32":
-        return 1
     try:
-        sandbox.enter()
-    except sandbox.SandboxError as error:
+        isolation.current().enter()
+    except IsolationUnavailable as error:
+        # Linux without user namespaces: never a weaker isolation (ADR 0006).
         print(error, file=sys.stderr)
         return 1
     files = select_files(options)

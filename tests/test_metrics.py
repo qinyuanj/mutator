@@ -1,4 +1,5 @@
 import dataclasses
+import os
 from pathlib import Path
 
 import pytest
@@ -138,13 +139,13 @@ def test_replacement_failure_preserves_shared_snapshot_and_legacy_records(tmp_pa
     legacy = path.with_name("legacy.edn")
     legacy.write_bytes(original)
 
-    def fail_replace(self, target):
+    def fail_replace(source, target):
         assert Path(target) == path
         # Readers still see the complete old artifact before the replacement.
         assert path.read_bytes() == original
         raise OSError("injected replacement failure")
 
-    monkeypatch.setattr(Path, "replace", fail_replace)
+    monkeypatch.setattr(os, "replace", fail_replace)
     with pytest.raises(OSError, match="injected replacement failure"):
         write_results(tmp_path, "b.go", [_form("demo", "Stop", "b.go", "hash-b")], {})
     assert path.read_bytes() == original
@@ -190,14 +191,14 @@ def test_failure_in_second_artifact_keeps_first_publication_and_shared_outcomes(
     original = z.read_bytes()
     legacy = z.with_name("legacy.edn")
     legacy.write_bytes(original)
-    replace = Path.replace
+    replace = os.replace
 
-    def fail_second(self, target):
+    def fail_second(source, target):
         if Path(target) == z:
             raise OSError("second artifact failed")
-        return replace(self, target)
+        return replace(source, target)
 
-    monkeypatch.setattr(Path, "replace", fail_second)
+    monkeypatch.setattr(os, "replace", fail_second)
     with pytest.raises(OSError, match="second artifact failed"):
         write_results(tmp_path, "b.go", [
             _form("first", "Fresh", "b.go", "fresh-b"),
@@ -269,5 +270,7 @@ def test_a_replaced_snapshot_stays_world_readable(tmp_path):
     write_results(tmp_path, "a.go", [_form("demo", "Run", "a.go", "hash-b")], {})
     path = snapshot_path(tmp_path, "demo")
     assert "hash-b" in path.read_text(encoding="utf-8")
-    assert path.stat().st_mode & 0o777 == 0o644
+    # Windows has no permission bits beyond read-only: st_mode reads 0o666.
+    if os.name == "posix":
+        assert path.stat().st_mode & 0o777 == 0o644
     assert sorted(item.name for item in path.parent.iterdir()) == ["demo.edn"]

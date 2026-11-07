@@ -9,8 +9,9 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from tempfile import NamedTemporaryFile
 
+from mutator import isolation
+from mutator.crapper_link import ensure_crapper
 from mutator.edn import dumps, keyword, loads
 from mutator.functions import mutation_file, mutation_namespace
 from mutator.model import FormResult, History, PriorForm
@@ -139,6 +140,9 @@ def _render_snapshot(namespace: str, source: str, forms: list[dict], outcomes: d
     payload = {
         "version": 1,
         "tested-at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        # The isolation of the run that wrote this file: :namespace-view or
+        # :copy (docs/adr/0007-windows-workers-run-in-copies.md).
+        "isolation": keyword(isolation.current().level),
         "source": source,
         "namespace": namespace,
         "outcomes": {key: keyword(outcomes[key]) for key in sorted(outcomes)},
@@ -268,23 +272,10 @@ def _write_namespace(
     if not rendered and not merged:
         path.unlink(missing_ok=True)
         return None
-    path.parent.mkdir(parents=True, exist_ok=True)
     text = _render_snapshot(namespace, _snapshot_source(fresh, kept_forms, file_key), rendered, merged)
-    temporary = None
-    try:
-        # Same directory keeps replacement on one filesystem; close before
-        # replacing so the snapshot is fully written.
-        with NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=path.parent, suffix=".tmp", delete=False
-        ) as stream:
-            temporary = Path(stream.name)
-            stream.write(text)
-        # NamedTemporaryFile creates 0600; a snapshot is as readable as before.
-        temporary.chmod(0o644)
-        temporary.replace(path)
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
+    # Staged beside the snapshot, LF bytes on every host, made readable, and
+    # renamed into place (retried while a Windows reader holds the old one).
+    ensure_crapper().atomic.write_bytes(path, text.encode("utf-8"))
     return path
 
 

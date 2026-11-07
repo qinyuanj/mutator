@@ -19,6 +19,8 @@ def _sibling_src() -> Path:
 _NEEDS = {
     "discover": ("changed_files", "exclusion_error", "excluded", "without_excluded", "under_roots"),
     "runners": ("stale_files",),
+    # Added with native Windows (crapper#10).
+    "atomic": ("write_bytes",),
 }
 
 
@@ -27,7 +29,7 @@ def _missing(crapper) -> list[str]:
         f"crapper.{module}.{name}"
         for module, names in _NEEDS.items()
         for name in names
-        if not hasattr(getattr(crapper, module), name)
+        if not hasattr(getattr(crapper, module, None), name)
     ]
 
 
@@ -43,6 +45,10 @@ def ensure_crapper():
             ) from None
         sys.path.insert(0, str(sibling))
         import crapper
+    try:
+        import crapper.atomic  # noqa: F401
+    except ImportError:
+        pass  # Reported as missing below.
     import crapper.coverage
     import crapper.discover
     import crapper.languages

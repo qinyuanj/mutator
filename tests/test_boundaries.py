@@ -7,13 +7,13 @@ alone when no input can tell the operators apart.
 
 import hashlib
 import io
-import signal
 import sys
 import threading
 from pathlib import Path
 
 import pytest
 
+from host import shell_command
 from mutator.cli import (
     _is_source,
     _prepare_coverage,
@@ -350,10 +350,10 @@ def test_a_process_without_a_return_code_counts_as_failure(monkeypatch, tmp_path
         def wait(self, timeout=None):
             return None
 
-    monkeypatch.setattr("mutator.runner.subprocess.Popen", lambda *args, **kwargs: Proc())
+    monkeypatch.setattr("mutator.runner._launch", lambda *args, **kwargs: Proc())
     # The fake pid is init's; never signal or wait on it.
     monkeypatch.setattr("mutator.runner._wait_unreaped", lambda process, timeout: True)
-    monkeypatch.setattr("mutator.runner._kill_group", lambda process, signum=signal.SIGKILL: False)
+    monkeypatch.setattr("mutator.runner._kill_group", lambda process, signum=None: False)
     result = CommandRunner().run("true", tmp_path, 5)
     assert result.code == 1
     assert result.output == ""
@@ -485,7 +485,7 @@ def test_cli_exit_codes_follow_kills_baseline_failure_and_an_empty_tree(tmp_path
     recorded = snapshot.read_text(encoding="utf-8")
 
     path.write_text("def place(x):\n    return x > 0\n", encoding="utf-8")
-    failing = f"{sys.executable} -c 'raise SystemExit(1)'"
+    failing = shell_command([sys.executable, "-c", "raise SystemExit(1)"])
     code = run(
         [
             "--no-coverage",
@@ -518,7 +518,7 @@ def test_a_scan_ignores_a_backup_and_a_run_refuses_it(tmp_path, capsys):
     assert "1 -> 0" not in scanned
 
     marker = tmp_path / "tests-ran"
-    touch = f"{sys.executable} -c 'import pathlib; pathlib.Path(\"{marker}\").touch()'"
+    touch = shell_command([sys.executable, "-c", f"import pathlib; pathlib.Path({str(marker)!r}).touch()"])
     code = run(
         [
             "--no-coverage",
@@ -544,11 +544,14 @@ def test_a_run_whose_source_is_edited_exits_4_and_keeps_the_edit(tmp_path, capsy
     source.write_text("def place(x):\n    return x > 0\n", encoding="utf-8")
     edited = "def place(x):\n    return x > 0\n# saved\n"
     marker = tmp_path / "edited"
+    # The edit is read from a file: no shell carries a newline in an argument.
+    saved = tmp_path / "saved.txt"
+    saved.write_bytes(edited.encode("utf-8"))
     script = (
         "import pathlib, sys; m = pathlib.Path(sys.argv[1]); "
-        "m.exists() or (pathlib.Path(sys.argv[2]).write_text(sys.argv[3]), m.touch())"
+        "m.exists() or (pathlib.Path(sys.argv[2]).write_bytes(pathlib.Path(sys.argv[3]).read_bytes()), m.touch())"
     )
-    edit = f"{sys.executable} -c '{script}' {marker} {source} '{edited}'"
+    edit = shell_command([sys.executable, "-c", script, str(marker), str(source), str(saved)])
     code = run(["--no-coverage", "--mutate-all", "--root", str(tmp_path),
                 "--test-command", edit, "src/demo.py"])
     assert code == 4

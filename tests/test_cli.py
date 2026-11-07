@@ -1,10 +1,13 @@
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-from mutator.cli import HELP, UNSUPPORTED_PLATFORM, parse_args, run
+from mutator import isolation
+from mutator.cli import HELP, parse_args, run, windows_refusal
+from mutator.isolation import IsolationUnavailable
 from mutator.edn import loads
 from mutator.metrics import snapshot_path
 from mutator.runner import CommandResult
@@ -32,12 +35,12 @@ def test_later_source_failure_retains_completed_source_and_previous_results(
     b_snapshot = snapshot_path(tmp_path, "b.calc")
     previous_b = b_snapshot.read_bytes()
     replaced_a = []
-    replace = Path.replace
+    replace = os.replace
 
-    def replace_or_fail(self, target):
+    def replace_or_fail(source, target):
         if Path(target) == b_snapshot and failure == "publication":
             raise OSError("publication failed")
-        result = replace(self, target)
+        result = replace(source, target)
         if Path(target) == a_snapshot:
             replaced_a.append(a_snapshot.read_bytes())
         return result
@@ -50,7 +53,7 @@ def test_later_source_failure_retains_completed_source_and_previous_results(
             raise OSError("worker failed")
         return passing(self, command, cwd, timeout)
 
-    monkeypatch.setattr(Path, "replace", replace_or_fail)
+    monkeypatch.setattr(os, "replace", replace_or_fail)
     monkeypatch.setattr(CommandRunner, "run", failing)
     if failure == "baseline":
         assert run(args) == 2  # A's survivors must not override B's baseline failure.
@@ -263,12 +266,29 @@ def test_run_reports_a_missing_crapper(monkeypatch, capsys):
     assert capsys.readouterr().err == "crapper not found\n"
 
 
-def test_native_windows_prints_the_platform_warning_and_stops(monkeypatch, tmp_path, capsys):
+def test_a_windows_build_before_22h2_is_refused_before_any_work(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr("mutator.cli.sys.platform", "win32")
+    monkeypatch.setattr("mutator.cli._windows_build", lambda: 19044)
     assert run(["--scan", "--no-coverage", "--root", str(tmp_path)]) == 1
     captured = capsys.readouterr()
-    assert captured.err == UNSUPPORTED_PLATFORM + "\n"
+    assert captured.err == windows_refusal("win32", 19044) + "\n"
+    assert "build 19045" in captured.err
     assert captured.out == ""
+
+
+def test_linux_without_user_namespaces_stops_instead_of_copying(monkeypatch, tmp_path, capsys):
+    class Refused(isolation.NamespaceViews):
+        def enter(self):
+            raise IsolationUnavailable("needs unprivileged user namespaces")
+
+    monkeypatch.setattr("mutator.cli.sys.platform", "linux")
+    monkeypatch.setattr(isolation, "_current", Refused())
+    (tmp_path / "app.py").write_text("def f(x):\n    return x > 0\n", encoding="utf-8")
+    assert run(["--no-coverage", "--test-command", "exit 0", "--root", str(tmp_path),
+                str(tmp_path / "app.py")]) == 1
+    captured = capsys.readouterr()
+    assert captured.err == "needs unprivileged user namespaces\n"
+    assert not (tmp_path / "target").exists()
 
 
 def test_changed_selects_a_dirty_source_file(tmp_path, monkeypatch, capsys):

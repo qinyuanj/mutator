@@ -1,6 +1,7 @@
-import shlex
+import sys
 from pathlib import Path
 
+from host import shell_command
 from mutator.cli import _prepare_coverage, parse_args
 from mutator.crapper_link import ensure_crapper
 
@@ -16,15 +17,27 @@ def _project(tmp_path: Path, *names: str) -> tuple[Path, list[Path]]:
     return root.resolve(), files
 
 
+# A Python script rather than sh, so the host shell (sh or cmd.exe) only starts it.
+COVERAGE = """\
+import sys
+from pathlib import Path
+with open(sys.argv[1], "a") as log:
+    log.write("run\\n")
+Path("coverage").mkdir(exist_ok=True)
+records = [
+    f"SF:{path.as_posix()}\\nDA:1,1\\nLF:1\\nLH:1\\nend_of_record\\n"
+    for top in ("src", "lib") for path in sorted(Path(top).rglob("*")) if path.is_file()
+]
+Path("coverage", "lcov.info").write_text("".join(records))
+"""
+
+
 def _command(tmp_path: Path) -> str:
     """Log each run and write the LCOV crapper requires a custom command to produce."""
 
-    record = r"SF:%s\nDA:1,1\nLF:1\nLH:1\nend_of_record\n"
-    return (
-        f"echo run >> {shlex.quote(str(tmp_path / 'log'))} && mkdir -p coverage && "
-        f"for f in $(find src lib -type f 2>/dev/null); do printf '{record}' \"$f\"; done"
-        " > coverage/lcov.info"
-    )
+    script = tmp_path / "coverage_command.py"
+    script.write_text(COVERAGE, encoding="utf-8")
+    return shell_command([sys.executable, str(script), str(tmp_path / "log")])
 
 
 def _runs(tmp_path: Path) -> int:

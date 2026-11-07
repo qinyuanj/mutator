@@ -3,6 +3,7 @@
 from datetime import datetime
 from pathlib import Path
 
+from host import WINDOWS
 from mutator.edn import loads
 from mutator.cli import parse_args, run
 from mutator.runner import CommandRunner
@@ -69,6 +70,8 @@ def test_fast_task_publishes_survivors_without_touching_sources(tmp_path, monkey
     assert published["forms"][0].pop("hash")
     assert published == {
         "version": 1,
+        # The one field that differs between hosts (ADR 0007).
+        "isolation": "copy" if WINDOWS else "namespace-view",
         "source": "src/calc.lua",
         "namespace": "calc",
         "outcomes": {

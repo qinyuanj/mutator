@@ -1,23 +1,25 @@
-"""An interrupted run leaves no tests, overlays or mutants behind (issue #21)."""
+"""An interrupted run leaves no tests, overlays or mutants behind (issue #21).
 
-import os
+Windows delivers neither SIGTERM nor a Ctrl+C sent to another console group,
+so there the interrupt is Ctrl+Break (SIGBREAK). A mutator killed outright
+leaves no test running (its jobs close with it) and its copies are swept by
+the next run.
+"""
+
 import signal
 import subprocess
 import sys
 import time
-from pathlib import Path
 
 import pytest
 
+from host import WINDOWS, alive
+
 ORIGINAL = b"def add(a, b):\n    return a + b\n\n\ndef sub(a, b):\n    return a - b\n"
 
-
-def _alive(pid: int) -> bool:
-    try:
-        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
-    except (FileNotFoundError, ProcessLookupError):
-        return False
-    return state != "Z"
+STOPS = [signal.CTRL_BREAK_EVENT] if WINDOWS else [signal.SIGTERM, signal.SIGINT]
+# The signal mutator sees for each stop, and so its exit status 128 + signum.
+SEEN = {getattr(signal, "CTRL_BREAK_EVENT", None): getattr(signal, "SIGBREAK", None)}
 
 
 def _wait(predicate, seconds=30.0) -> bool:
@@ -29,19 +31,21 @@ def _wait(predicate, seconds=30.0) -> bool:
     return predicate()
 
 
-@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGINT])
-def test_an_interrupted_run_kills_its_tests_and_removes_its_overlays(tmp_path, signum):
+def _start(tmp_path):
     project = tmp_path / "project"
     project.mkdir()
     source = project / "calc.py"
     source.write_bytes(ORIGINAL)
+    # One file per mutant: two processes appending to one file can lose a
+    # line on Windows, where append mode seeks to the end and then writes.
     pids = tmp_path / "pids"
+    pids.mkdir()
     check = tmp_path / "check.py"
     check.write_text(
         "import os, sys, time\n"
         "if open('calc.py').read() == " + repr(ORIGINAL.decode()) + ":\n"
         "    sys.exit(0)\n"
-        f"open({str(pids)!r}, 'a').write(f'{{os.getpid()}}\\n')\n"
+        f"open(os.path.join({str(pids)!r}, str(os.getpid())), 'w').close()\n"
         "time.sleep(60)\n",
         encoding="utf-8",
     )
@@ -50,19 +54,53 @@ def test_an_interrupted_run_kills_its_tests_and_removes_its_overlays(tmp_path, s
         [sys.executable, "-m", "mutator", "--no-coverage", "--mutate-all", "--max-workers", "2",
          "--test-command", command, str(source)],
         cwd=project, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        # Ctrl+Break reaches only a process group of its own.
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if WINDOWS else 0,
     )
+    started = _wait(lambda: len(list(pids.iterdir())) >= 2)
+    if not started:
+        message = process.stderr.read() if process.poll() is not None else "no mutant started"
+        process.kill()
+        pytest.fail(message)
+    return project, source, pids, process
+
+
+@pytest.mark.parametrize("signum", STOPS)
+def test_an_interrupted_run_kills_its_tests_and_removes_its_overlays(tmp_path, signum):
+    project, source, pids, process = _start(tmp_path)
     try:
-        assert _wait(lambda: pids.exists() and len(pids.read_text().split()) >= 2), \
-            process.stderr.read() if process.poll() is not None else "no mutant started"
         process.send_signal(signum)
         _out, err = process.communicate(timeout=30)
     finally:
         if process.poll() is None:
             process.kill()
-    assert process.returncode == 128 + signum, err
+    assert process.returncode == 128 + SEEN.get(signum, signum), err
     assert "Interrupted" in err
-    for pid in map(int, pids.read_text().split()):
-        assert _wait(lambda: not _alive(pid), 5), f"test process {pid} survived"
+    for pid in (int(entry.name) for entry in pids.iterdir()):
+        assert _wait(lambda: not alive(pid), 5), f"test process {pid} survived"
     assert source.read_bytes() == ORIGINAL
     assert not list((project / "target" / "mutation-workers").glob("run-*"))
     assert not (project / ".metrics").exists()
+
+
+@pytest.mark.skipif(not WINDOWS, reason="a SIGKILLed mutator's Linux test sessions outlive it; "
+                    "its views vanish with its namespace")
+def test_a_killed_mutator_leaves_no_test_running_and_the_next_run_sweeps_its_copies(tmp_path):
+    project, source, pids, process = _start(tmp_path)
+    process.kill()
+    process.communicate(timeout=30)
+    for pid in (int(entry.name) for entry in pids.iterdir()):
+        assert _wait(lambda: not alive(pid), 5), f"test process {pid} outlived mutator"
+    workers = project / "target" / "mutation-workers"
+    abandoned = list(workers.glob("run-*"))
+    assert abandoned, "a killed run leaves its copies"
+    passing = f'"{sys.executable}" -c "raise SystemExit(0)"'
+    rerun = subprocess.run(
+        [sys.executable, "-m", "mutator", "--no-coverage", "--mutate-all", "--max-workers", "1",
+         "--test-command", passing, str(source)],
+        cwd=project, capture_output=True, text=True, timeout=120,
+    )
+    assert rerun.returncode == 3, rerun.stderr
+    assert not any(directory.exists() for directory in abandoned)
+    assert not list(workers.glob("run-*"))
+    assert source.read_bytes() == ORIGINAL
