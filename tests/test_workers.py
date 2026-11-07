@@ -46,12 +46,13 @@ raise SystemExit(0 if value == 1 else 3)
 def test_base_layer_failures_are_visible_and_cleaned(monkeypatch, tmp_path):
     source = project(tmp_path)
     (tmp_path / "build").mkdir()
-    error = OSError("xattr failure")
+    error = OSError("base layer failure")
 
     def fail(*args, **kwargs):
         raise error
 
-    monkeypatch.setattr("mutator.workers.make_opaque", fail)
+    # Hiding build output is the first step of either isolation's prepare.
+    monkeypatch.setattr("mutator.isolation.hidden_paths", fail)
     base = tmp_path / "workers"
     with pytest.raises(OSError) as raised:
         create_workers(base, tmp_path, "src/value.py", source.read_bytes(), 2)

@@ -14,6 +14,8 @@ import os
 import threading
 from pathlib import Path
 
+from mutator.isolation import IsolationUnavailable
+
 _CLONE_NEWNS = 0x00020000
 _CLONE_NEWUSER = 0x10000000
 _MS_REC = 0x4000
@@ -31,7 +33,7 @@ _libc = ctypes.CDLL(None, use_errno=True)
 _entered = False
 
 
-class SandboxError(RuntimeError):
+class SandboxError(IsolationUnavailable):
     """The system cannot give mutator a private mount namespace."""
 
 

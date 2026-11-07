@@ -1,70 +1,41 @@
-"""Run mutants in overlay views.
+"""Run mutants in worker views.
 
-Each worker is an empty directory under target/mutation-workers with a fixed
-base layer beside it. Every command runs in a fresh overlay view mounted at
-the worker: the base layer and the project tree below, an empty writable
-layer on top. The source under test is written into the view, and the view is
-discarded afterwards, so nothing a test writes reaches the project or the next
-mutant. A Lua run keeps its workers across files; Rust runs in worker slots
-whose paths and Cargo targets persist across files and runs; other callers use
-per-file workers. (docs/adr/0006-mutants-run-in-overlay-views.md)
+Each worker is a fixed path under target/mutation-workers. Every command runs
+in a fresh view of the project at the worker, made by the host's isolation:
+an overlay view on Linux, a copy on Windows (``mutator.isolation``). The
+source under test is written into the view, and the view is discarded
+afterwards, so nothing a test writes reaches the project or the next mutant.
+A Lua run keeps its workers across files; Rust runs in worker slots whose
+paths and Cargo targets persist across files and runs; other callers use
+per-file workers. (docs/adr/0006-mutants-run-in-overlay-views.md,
+docs/adr/0007-windows-workers-run-in-copies.md)
 """
 
 from __future__ import annotations
 
-import atexit
-import fcntl
 import hashlib
 import os
 import re
 import shutil
-import stat
 import subprocess
 import sys
-import tempfile
-import time
 import tomllib
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from queue import Empty, Queue
 from threading import Event, Lock
 
+from mutator import isolation
+from mutator.filelock import try_lock, unlock
+from mutator.isolation import HIDDEN, delete_tree
 from mutator.model import Site
 from mutator.runner import SLOT_PREFIX, Command, run_tests
-from mutator.sandbox import make_opaque, mount_overlay, unmount
 from mutator.sites import apply_site
 from mutator.timings import measure, record
 
-# Build output and the worker tree itself are hidden in a view. ``target``
-# would show a worker the directory that contains the worker. Rust workers get
-# their own build output instead: a slot target
-# (docs/adr/0004-rust-worker-slots-keep-cargo-target.md).
-HIDDEN = frozenset(
-    {
-        ".git",
-        ".hg",
-        ".svn",
-        ".idea",
-        ".venv",
-        "venv",
-        "target",
-        "dist",
-        "build",
-        "out",
-        "coverage",
-        ".metrics",
-        "__pycache__",
-        ".pytest_cache",
-        ".mypy_cache",
-        ".clj-kondo",
-        ".gradle",
-        ".uml-viewer",
-        ".toolcache",
-    }
-)
+__all__ = ["HIDDEN", "delete_tree"]
 
 
 def worker_count(site_count: int, requested: int | None) -> int:
@@ -80,21 +51,22 @@ _created_runs: set[Path] = set()
 
 
 def new_run_dir(root: Path) -> Path:
-    directory = root / "target" / "mutation-workers" / f"run-{uuid.uuid4()}"
+    workers = root / "target" / "mutation-workers"
+    isolation.current().sweep(workers)
+    directory = workers / f"run-{uuid.uuid4()}"
     directory.mkdir(parents=True)
     _created_runs.add(directory)
+    isolation.current().claim_run(directory)
     return directory
 
 
 def discard_overlays() -> None:
-    """Remove the overlays this process created and has not removed yet.
+    """Remove the views this process created and has not removed yet.
 
-    Worker slots lose their overlay and keep their slot target.
+    Worker slots lose their view and keep their slot target.
     """
 
-    for worker in list(_mounted):
-        unmount(worker)
-        _mounted.discard(worker)
+    isolation.current().discard()
     for directory in list(_created_runs):
         _delete_run(directory)
         _created_runs.discard(directory)
@@ -103,121 +75,28 @@ def discard_overlays() -> None:
 
 
 def _is_link(path: Path) -> bool:
-    return stat.S_ISLNK(path.lstat().st_mode)
-
-
-def delete_tree(path: Path) -> None:
-    """Remove worker data, unlinking links without visiting their targets.
-
-    A mounted view is detached first; deleting through it would only fill its
-    writable layer.
-    """
-
-    try:
-        linked = _is_link(path)
-    except FileNotFoundError:
-        return
-    if linked:
-        path.unlink()
-        return
-    if path.is_dir():
-        if os.path.ismount(path):
-            unmount(path)
-        if not os.access(path, os.R_OK | os.W_OK | os.X_OK):
-            # overlayfs leaves its work directory without permissions.
-            os.chmod(path, 0o700)
-        for child in list(path.iterdir()):
-            delete_tree(child)
-        path.rmdir()
-        return
-    path.unlink()
-
-
-_scratch: Path | None = None
-
-
-def _layers(worker: Path) -> tuple[Path, Path, Path]:
-    """The worker's base layer, and the writable and work layers of its view.
-
-    They live outside the project: overlayfs refuses a layer inside another
-    layer, and the project is the lowest one.
-    """
-
-    global _scratch
-    if _scratch is None:
-        _scratch = Path(tempfile.mkdtemp(prefix="mutator-layers-"))
-        atexit.register(delete_tree, _scratch)
-    home = _scratch / hashlib.sha256(str(worker.absolute()).encode()).hexdigest()[:16]
-    return home / "base", home / "upper", home / "work"
+    return isolation.is_link(path)
 
 
 def _delete_run(directory: Path) -> None:
     for worker in directory.glob("worker-*"):
         _remove_worker(worker)
+    isolation.current().release_run(directory)
     delete_tree(directory)
 
 
 def _remove_worker(worker: Path) -> None:
-    delete_tree(worker)
-    delete_tree(_layers(worker)[0].parent)
+    isolation.current().remove(worker)
 
 
 def _build_base(worker: Path, root: Path, relatives, sources: dict[str, bytes]) -> None:
-    """The worker's fixed layer: ``sources`` over the project, build output hidden.
+    """Prepare ``worker``'s views: ``sources`` over the project, build output hidden."""
 
-    Hidden directories are those at the project root and beside every
-    directory on the path to a source under test.
-    """
-
-    _remove_worker(worker)
-    worker.mkdir(parents=True)
-    base = _layers(worker)[0]
-    base.mkdir(parents=True)
-    folders = {Path(name).parent for name in [*relatives, *sources]}
-    folders |= {parent for folder in list(folders) for parent in folder.parents}
-    for folder in folders:
-        for name in HIDDEN:
-            real = root / folder / name
-            if real.exists() or real.is_symlink():
-                hidden = base / folder / name
-                hidden.mkdir(parents=True, exist_ok=True)
-                make_opaque(hidden)
-    for name, data in sources.items():
-        (base / name).parent.mkdir(parents=True, exist_ok=True)
-        (base / name).write_bytes(data)
-
-
-# Views mounted now, so an interrupt can detach them.
-_mounted: set[Path] = set()
-
-
-@contextmanager
-def _view(worker: Path, root: Path, relative: str, data: bytes):
-    """A fresh view at ``worker`` holding ``data`` at ``relative``.
-
-    The source is stamped with the current time even when it is the
-    original: a slot target may hold a newer build of a mutant
-    (docs/adr/0004).
-    """
-
-    base, upper, work = _layers(worker)
-    for layer in (upper, work):
-        delete_tree(layer)
-        layer.mkdir()
-    mount_overlay(worker, [base, root.resolve()], upper, work)
-    _mounted.add(worker)
-    try:
-        _write_fresh(worker / relative, data)
-        yield
-    finally:
-        unmount(worker)
-        _mounted.discard(worker)
-        delete_tree(upper)
-        delete_tree(work)
+    isolation.current().prepare(worker, root, relatives, sources)
 
 
 def _run_in_view(directory, root, relative, data, runner, command, cwd, timeout):
-    with _view(directory, root, relative, data):
+    with isolation.current().view(directory, root, relative, data):
         return run_tests(runner, command, mapped_cwd(directory, root, cwd), timeout)
 
 
@@ -237,19 +116,6 @@ def create_workers(
         _delete_run(base)
         raise
     return created
-
-
-def _write_fresh(path: Path, data: bytes) -> None:
-    """Write ``data`` and stamp it with the fine-grained current time.
-
-    Cargo treats a source no newer than its last build as unchanged. The
-    kernel stamps a write with a clock that can lag the build's own stamp by
-    a tick, so the time is set explicitly (docs/adr/0004).
-    """
-
-    path.write_bytes(data)
-    now = time.time_ns()
-    os.utime(path, ns=(now, now))
 
 
 def mapped_cwd(worker: Path, root: Path, cwd: Path) -> Path:
@@ -573,12 +439,21 @@ def _seed(root: Path, target: Path) -> None:
     partial = target.with_name(target.name + ".partial")
     delete_tree(partial)
     partial.mkdir(parents=True)
-    copied = subprocess.run(
-        ["cp", "-a", "--reflink=auto", str(source), str(partial / "debug")],
-        capture_output=True, text=True,
-    )
-    if copied.returncode != 0:
-        print(f"Could not seed {target} from {source}; building cold.\n{copied.stderr}",
+    if sys.platform == "win32":
+        # copy2 is CopyFile2: mtimes kept, block-cloned where the volume can.
+        try:
+            shutil.copytree(source, partial / "debug", symlinks=True, copy_function=shutil.copy2)
+            error = ""
+        except (OSError, shutil.Error) as exc:
+            error = str(exc)
+    else:
+        copied = subprocess.run(
+            ["cp", "-a", "--reflink=auto", str(source), str(partial / "debug")],
+            capture_output=True, text=True,
+        )
+        error = (copied.stderr or f"cp exited {copied.returncode}") if copied.returncode != 0 else ""
+    if error:
+        print(f"Could not seed {target} from {source}; building cold.\n{error}",
               file=sys.stderr)
         delete_tree(partial)
         return
@@ -664,9 +539,7 @@ class WorkerSlots:
                 continue
             slot.mkdir(parents=True, exist_ok=True)
             descriptor = os.open(slot / "lock", os.O_RDWR | os.O_CREAT, 0o644)
-            try:
-                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
+            if not try_lock(descriptor):
                 os.close(descriptor)
                 continue
             self.slots.append(slot)
@@ -714,6 +587,7 @@ class WorkerSlots:
         self.close()
         for slot, descriptor in zip(self.slots, self.locks):
             _held_slots.discard(slot)
+            unlock(descriptor)
             os.close(descriptor)
         self.slots, self.locks = [], []
 

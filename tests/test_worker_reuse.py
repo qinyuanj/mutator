@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from host import link_directory, remove_directory_link
 from mutator.model import Site
 from mutator.runner import CommandResult
 from mutator.workers import WorkerBaselineError, WorkerPool, run_mutants
@@ -232,7 +233,7 @@ def linked_project(tmp_path, target):
     root = tmp_path / "project"
     root.mkdir()
     sources = fixture(root)
-    (root / "design").symlink_to(target(root), target_is_directory=True)
+    link_directory(root / "design", target(root))
     return root, sources
 
 
@@ -260,8 +261,8 @@ def test_retargeting_an_outside_link_is_a_project_input_change(tmp_path):
     (tmp_path / "elsewhere").mkdir()
     with WorkerPool(root, sources) as pool:
         run(root, sources[0], Runner(), pool)
-        (root / "design").unlink()
-        (root / "design").symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+        remove_directory_link(root / "design")
+        link_directory(root / "design", tmp_path / "elsewhere")
         with pytest.raises(WorkerBaselineError, match="Project inputs"):
             run(root, sources[1], Runner(), pool)
 
