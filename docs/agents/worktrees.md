@@ -4,8 +4,8 @@ The main checkout may have no `.venv`. Each agent working in a `git worktree` mu
 
 ## Per-worktree setup
 
-1. Create a venv inside the worktree: `python -m venv .venv`, then `pip install -e ".[dev]"`.
-2. `crapper` must be a sibling of the worktree root (`ensure_crapper` looks for `../crapper/src`). In a worktrees directory, a symlink to the real crapper checkout works.
+1. Create a venv inside the worktree: `python -m venv .venv`, then `pip install -e ".[dev]"` (the interpreter is `.venv/bin/python`, on native Windows `.venv\Scripts\python`).
+2. `crapper` must be a sibling of the worktree root (`ensure_crapper` looks for `../crapper/src`). In a worktrees directory, a symlink to the real crapper checkout works; on Windows a directory junction (`mklink /J`) needs no privilege.
 3. When running tests *against* a checkout without installing it, pin `PYTHONPATH` to that checkout's `src` — otherwise an installed editable mutator from another worktree wins the import.
 
 ## Reporting test results
