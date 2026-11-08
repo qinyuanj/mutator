@@ -17,7 +17,6 @@ import hashlib
 import os
 import re
 import shutil
-import subprocess
 import sys
 import tomllib
 import uuid
@@ -28,6 +27,7 @@ from queue import Empty, Queue
 from threading import Event, Lock
 
 from mutator import isolation
+from mutator.crapper_link import ensure_crapper
 from mutator.filelock import try_lock, unlock
 from mutator.isolation import HIDDEN, delete_tree
 from mutator.model import Site
@@ -447,10 +447,8 @@ def _seed(root: Path, target: Path) -> None:
         except (OSError, shutil.Error) as exc:
             error = str(exc)
     else:
-        copied = subprocess.run(
-            ["cp", "-a", "--reflink=auto", str(source), str(partial / "debug")],
-            capture_output=True, text=True,
-        )
+        copied = ensure_crapper().platform.run(
+            ["cp", "-a", "--reflink=auto", str(source), str(partial / "debug")], root, capture=True)
         error = (copied.stderr or f"cp exited {copied.returncode}") if copied.returncode != 0 else ""
     if error:
         print(f"Could not seed {target} from {source}; building cold.\n{error}",
