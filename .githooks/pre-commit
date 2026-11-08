@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Fast checks before every commit: processes start only inside the platform
+# boundary, and golden fixtures and EDN files carry no CR.
+# Enable once per clone: git config core.hooksPath .githooks
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+# python3 is a Microsoft Store stub on Windows; take the first that has pytest.
+python=${PYTHON:-}
+if [ -z "$python" ]; then
+  for candidate in .venv/bin/python python3 python; do
+    if "$candidate" -c 'import pytest' >/dev/null 2>&1; then python=$candidate; break; fi
+  done
+fi
+if [ -z "$python" ]; then
+  echo "pre-commit: no Python with pytest found; set PYTHON to one." >&2
+  exit 1
+fi
+
+PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}" "$python" -m pytest -q -p no:cacheprovider tests/test_guardrails.py

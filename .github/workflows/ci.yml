@@ -1,0 +1,31 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      # crapper_link imports crapper from the ../crapper sibling checkout.
+      - uses: actions/checkout@v4
+        with:
+          path: mutator
+      - uses: actions/checkout@v4
+        with:
+          repository: qinyuanj/crapper
+          path: crapper
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Linux mutants run in unprivileged user + mount namespaces (sandbox.py);
+      # Ubuntu 24.04 restricts those through AppArmor unless this is off.
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      # Lua 5.4, Busted, LuaCov and cluacov, so the Lua tests run instead of skipping.
+      - run: bash scripts/setup-ubuntu.sh
+        working-directory: mutator
+      - run: .venv/bin/python -m pytest -q -rs
+        working-directory: mutator

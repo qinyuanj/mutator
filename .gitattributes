@@ -1,3 +1,5 @@
 *.edn text eol=lf
 tests/fixtures/** text eol=lf
 *.cmd text eol=crlf
+# The pre-commit hook runs under sh, which rejects CR.
+.githooks/** text eol=lf
