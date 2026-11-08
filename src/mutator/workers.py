@@ -425,6 +425,23 @@ def _check_once(checked: set, directory, root, relative, original, cwd, runner, 
 _held_slots: set[Path] = set()
 
 
+def _copy_build(source: Path, destination: Path, cwd: Path) -> str:
+    """Copy a build tree with its mtimes, reflinked where the filesystem can; the error, or ""."""
+
+    if sys.platform == "win32":
+        # copy2 is CopyFile2: mtimes kept, block-cloned where the volume can.
+        try:
+            shutil.copytree(source, destination, symlinks=True, copy_function=shutil.copy2)
+        except (OSError, shutil.Error) as exc:
+            return str(exc)
+        return ""
+    copied = ensure_crapper().platform.run(
+        ["cp", "-a", "--reflink=auto", str(source), str(destination)], cwd, capture=True)
+    if copied.returncode == 0:
+        return ""
+    return copied.stderr or f"cp exited {copied.returncode}"
+
+
 def _seed(root: Path, target: Path) -> None:
     """Start a new slot target from the project's own debug build, if any.
 
@@ -439,17 +456,7 @@ def _seed(root: Path, target: Path) -> None:
     partial = target.with_name(target.name + ".partial")
     delete_tree(partial)
     partial.mkdir(parents=True)
-    if sys.platform == "win32":
-        # copy2 is CopyFile2: mtimes kept, block-cloned where the volume can.
-        try:
-            shutil.copytree(source, partial / "debug", symlinks=True, copy_function=shutil.copy2)
-            error = ""
-        except (OSError, shutil.Error) as exc:
-            error = str(exc)
-    else:
-        copied = ensure_crapper().platform.run(
-            ["cp", "-a", "--reflink=auto", str(source), str(partial / "debug")], root, capture=True)
-        error = (copied.stderr or f"cp exited {copied.returncode}") if copied.returncode != 0 else ""
+    error = _copy_build(source, partial / "debug", root)
     if error:
         print(f"Could not seed {target} from {source}; building cold.\n{error}",
               file=sys.stderr)

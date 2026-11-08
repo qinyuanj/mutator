@@ -3,7 +3,11 @@
 import json
 import os
 import sys
+from pathlib import Path
 
+import pytest
+
+from host import symlink_file
 from mutator.runner import CommandRunner
 from mutator.model import Site
 from mutator.workers import WorkerSlots, discard_overlays, run_mutants
@@ -71,6 +75,39 @@ def test_a_new_slot_target_is_seeded_from_the_project_build_with_its_mtimes(tmp_
     with WorkerSlots(tmp_path) as slots:
         slots.prepare("src/a.rs", a.read_bytes(), 1)
     assert not (worker.parent / "target" / "debug" / "later").exists()
+
+
+def test_a_link_in_the_project_build_stays_a_link_in_the_seeded_slot(tmp_path):
+    a, _b = project(tmp_path)
+    debug = tmp_path / "target" / "debug"
+    debug.mkdir(parents=True)
+    (debug / "libdemo.rlib").write_bytes(b"rlib")
+    symlink_file(debug / "demo.rlib", Path("libdemo.rlib"))
+    with WorkerSlots(tmp_path) as slots:
+        [worker] = slots.prepare("src/a.rs", a.read_bytes(), 1)
+    seeded = worker.parent / "target" / "debug" / "demo.rlib"
+    assert seeded.is_symlink()
+    assert os.readlink(seeded) == "libdemo.rlib"
+
+
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0,
+                    reason="cp seeds POSIX slots; root reads an unreadable file anyway")
+def test_a_failed_copy_names_what_cp_said_and_the_slot_builds_cold(tmp_path, capsys):
+    a, _b = project(tmp_path)
+    debug = tmp_path / "target" / "debug"
+    debug.mkdir(parents=True)
+    unreadable = debug / "unreadable-artifact"
+    unreadable.write_bytes(b"rlib")
+    unreadable.chmod(0)
+    try:
+        with WorkerSlots(tmp_path) as slots:
+            [worker] = slots.prepare("src/a.rs", a.read_bytes(), 1)
+    finally:
+        unreadable.chmod(0o600)
+    err = capsys.readouterr().err
+    assert "building cold" in err
+    assert "unreadable-artifact" in err
+    assert not (worker.parent / "target").exists()
 
 
 def test_without_a_project_build_the_slot_builds_cold(tmp_path):
