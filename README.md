@@ -2,6 +2,8 @@
 
 Mutation testing for Clojure, Java, Go, TypeScript, Rust, Python, and Lua. One run detects the language of each source file, applies that language's mutation rules, and writes the snapshot [uml-viewer](https://github.com/unclebob/uml-viewer) already reads.
 
+> **DeepSeek Harness users:** the [dsh-uml-viewer](https://github.com/qinyuanj/dsh-uml-viewer) plugin carries a Rust port of mutator as its `uml-viewer mutate` subcommand, so inside DSH you need nothing from this repository. Outside DSH, mutator still works on its own and the frozen [uml-viewer](https://github.com/qinyuanj/uml-viewer) `get-uml-viewer` flow still uses it. New features go to dsh-uml-viewer; this repository takes bug fixes only.
+
 Clojure follows [clj-mutate](https://github.com/unclebob/clj-mutate). Go follows [mutate4go](https://github.com/unclebob/mutate4go). Java follows [mutate4java](https://github.com/unclebob/mutate4java). TypeScript, Rust, Python, and Lua start with the Java decisions, spelled in that language, with the additions listed below. Function names and namespaces come from [crapper](https://github.com/unclebob/crapper), which is what uml-viewer joins to `.metrics/crap.edn`.
 
 A mutant is killed when the tests fail or time out. It survives when the tests still pass. A site on a line the coverage report does not hit is uncovered and is not run. The score uml-viewer paints is killed / (killed + survived).
