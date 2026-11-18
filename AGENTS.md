@@ -1,5 +1,15 @@
 # AGENTS.md
 
+## Host
+
+Native Windows x64 is the only supported host
+([ADR 0002](https://github.com/qinyuanj/home-uml-viewer/blob/main/docs/adr/0002-macos-is-not-a-supported-host.md)).
+macOS is refused and stays refused (mutator#26, closed as not planned). The Linux
+namespace view is kept in the code and no delivery surface reaches it; do not delete
+it, and read [docs/mutation-linux.md](docs/mutation-linux.md) before changing it.
+
+Run the tests with `.venv\Scripts\python -m pytest` from a native Windows shell.
+
 ## Agent skills
 
 ### Issue tracker

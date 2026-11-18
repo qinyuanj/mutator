@@ -98,3 +98,11 @@ Native Lua may be unable to open non-ANSI source paths.
   outside this ticket and not available as an ordinary developer process.
 - Explicit FSCTL_DUPLICATE_EXTENTS_TO_FILE: unnecessary complexity for the
   supported modern ReFS automatic-clone path; full copying works elsewhere.
+
+## Status note (2026-11-18)
+
+Copy isolation is now the only delivered isolation. Linux x64 left the host list with
+#5 (ADR 0002 in `qinyuanj/home-uml-viewer`), so the namespace views this ADR leaves to
+Linux are kept but unreachable. Every real user takes a copy, and a `mutate` that is
+slower on Windows than the same run would be on Linux is the declared cost of that, not
+a defect. See [docs/mutation-linux.md](../mutation-linux.md).

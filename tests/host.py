@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess
 import sys
@@ -13,6 +14,20 @@ WINDOWS = sys.platform == "win32"
 
 # Where a virtualenv keeps its interpreter.
 VENV_PYTHON = Path("Scripts", "python.exe") if WINDOWS else Path("bin", "python")
+
+# A toolchain the tests need. A skip reads as a pass, so CI sets
+# MUTATOR_REQUIRE_TOOLCHAINS=1 and a missing toolchain fails instead.
+REQUIRE_TOOLCHAINS = os.environ.get("MUTATOR_REQUIRE_TOOLCHAINS") == "1"
+
+
+def require_toolchain(ready: bool, reason: str) -> None:
+    """Skip for a missing toolchain, or fail where a skip would read as a pass."""
+
+    if ready:
+        return
+    if REQUIRE_TOOLCHAINS:
+        pytest.fail(f"{reason}; MUTATOR_REQUIRE_TOOLCHAINS=1 makes that a failure")
+    pytest.skip(reason)
 
 
 def shell_command(argv: list[str]) -> str:

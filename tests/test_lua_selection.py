@@ -8,6 +8,7 @@ import shutil
 
 import pytest
 
+from host import require_toolchain
 from mutator import engine
 from mutator.crapper_link import ensure_crapper
 from mutator.engine import mutate_file
@@ -541,8 +542,10 @@ def test_selected_survivors_require_full_confirmation_and_pristine_baseline(tmp_
 
 @pytest.mark.parametrize("cross_dependency", [False, True])
 def test_real_busted_selected_specs_match_full_suite(tmp_path, cross_dependency):
-    if shutil.which("busted") is None or ensure_crapper().runners.lua_interpreter() is None:
-        pytest.skip("Busted and Lua 5.4 are required")
+    require_toolchain(
+        shutil.which("busted") is not None and ensure_crapper().runners.lua_interpreter() is not None,
+        "Busted and Lua 5.4 are required",
+    )
     source = project(tmp_path)
     (tmp_path / ".busted").write_text(
         "return {default = {lpath = 'src/?.lua;' .. package.path}}\n", encoding="utf-8")

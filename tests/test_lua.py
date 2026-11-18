@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from host import WINDOWS
+from host import WINDOWS, require_toolchain
 from mutator.crapper_link import ensure_crapper
 from mutator.functions import is_private, sites_in_file
 from mutator.runner import CommandRunner
@@ -25,8 +25,7 @@ def _sites(tmp_path: Path, relative: str, source: str):
 
 def test_lua_plan_rebases_paths_before_loading_worker_sources(tmp_path, monkeypatch, runners):
     lua = runners.lua_interpreter()
-    if lua is None:
-        pytest.skip("Lua 5.4 unavailable")
+    require_toolchain(lua is not None, "Lua 5.4 unavailable")
     root = tmp_path / "project with spaces"
     worker = root / "target" / "mutation-workers" / "run-1" / "worker-0"
     (worker / "src").mkdir(parents=True)
@@ -169,14 +168,14 @@ def _busted_argv_ready() -> bool:
     return _real_lua_interpreter() is not None and _busted_script() is not None
 
 
-@pytest.mark.skipif(
-    not _busted_argv_ready(), reason="busted and a Lua 5.4 interpreter are not installed"
-)
 def test_busted_runs_with_a_spaced_interpreter_path(tmp_path, monkeypatch, runners):
     """Execute the generated plan with a spaced native interpreter, including
     Busted config discovery and its success/failure exit codes.
     """
 
+    require_toolchain(
+        _busted_argv_ready(), "busted and a Lua 5.4 interpreter are not installed"
+    )
     interpreter = Path(_real_lua_interpreter())
     spaced = tmp_path / "lua tools" / "with space"
     spaced.mkdir(parents=True)
@@ -233,8 +232,8 @@ def _toolchain_ready() -> bool:
     )
 
 
-@pytest.mark.skipif(not _toolchain_ready(), reason="busted, luacov, and Lua 5.4 are not installed")
 def test_fixture_project_end_to_end(tmp_path):
+    require_toolchain(_toolchain_ready(), "busted, luacov, and Lua 5.4 are not installed")
     import shutil
     import subprocess
     import sys

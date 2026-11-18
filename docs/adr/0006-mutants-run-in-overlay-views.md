@@ -48,3 +48,13 @@ silently. Tests cannot mount inside a view.
   write the mutant into it, and every command line would change.
 - Fall back to symlink overlays without user namespaces: two worker
   implementations, and isolation that silently weakens.
+
+## Status note (2026-11-18)
+
+The host list shrank to native Windows x64 (#5, ADR 0002 in
+`qinyuanj/home-uml-viewer`). This decision still describes the code and no longer
+describes a delivered host: the namespace view is unreachable from the delivery
+surface, and every real user runs [ADR 0007](0007-windows-workers-run-in-copies.md)'s
+copies instead. The path stays, because it is the only entry point for restoring Linux
+support; deleting it is a separate decision. See
+[docs/mutation-linux.md](../mutation-linux.md).

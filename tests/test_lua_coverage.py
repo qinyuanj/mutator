@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from host import require_toolchain
 from mutator.crapper_link import ensure_crapper
 from mutator.lua_coverage import LuaCoverageIndex, _decode, _literal, collect, load
 from mutator.runner import CommandRunner, _rocks_trees
@@ -46,8 +47,7 @@ def project(tmp_path):
 def toolchain(monkeypatch):
     runners = ensure_crapper().runners
     lua = runners.lua_interpreter()
-    if lua is None:
-        pytest.skip("Lua 5.4 unavailable")
+    require_toolchain(lua is not None, "Lua 5.4 unavailable")
     # A local rock tree can provide the required native hook without changing
     # or executing any project that owns that tree.
     checkout = Path(__file__).resolve().parents[1]
@@ -70,8 +70,9 @@ def toolchain(monkeypatch):
          + "require('cluacov.hook'); print('ready')"],
         Path(__file__).parent, 15,
     )
-    if probe.code != 0:
-        pytest.skip(f"Busted/LuaCov/cluacov toolchain unavailable: {probe.output}")
+    require_toolchain(
+        probe.code == 0, f"Busted/LuaCov/cluacov toolchain unavailable: {probe.output}"
+    )
     # Runs that start a bare interpreter (the collector profile) search the
     # same trees as the probe; Lua's defaults would miss a user tree's dkjson.
     found = [tree.as_posix() for tree in trees if tree.is_dir()]

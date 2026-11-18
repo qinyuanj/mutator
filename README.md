@@ -8,7 +8,21 @@ Clojure follows [clj-mutate](https://github.com/unclebob/clj-mutate). Go follows
 
 A mutant is killed when the tests fail or time out. It survives when the tests still pass. A site on a line the coverage report does not hit is uncovered and is not run. The score uml-viewer paints is killed / (killed + survived).
 
+## Host
+
+Native Windows x64 is the only supported host. macOS left the list first and Linux
+x64 left with the same decision; both are recorded in ADR 0002 of
+`qinyuanj/home-uml-viewer` (`docs/adr/0002-macos-is-not-a-supported-host.md`).
+The isolation delivered with it is a copy of the project per command
+([ADR 0007](docs/adr/0007-windows-workers-run-in-copies.md)). The Linux namespace
+view is kept and no delivery surface reaches it
+([docs/mutation-linux.md](docs/mutation-linux.md)); macOS has neither mechanism, so
+mutator exits 1 there, and that refusal is final (mutator#26, closed as not planned).
+
 ## Run
+
+`./mutator` is the POSIX launcher. On the supported host, install and run
+`python -m mutator` as [Native Windows](#native-windows) describes.
 
 ```bash
 ./mutator
@@ -49,9 +63,13 @@ Mutants of one file run at the same time. The default is one worker per core. `-
 
 Each worker is a directory under `target/mutation-workers`. Lua schedules
 previous survivors first within each file to reduce a long final tail; history
-changes execution order only. On Linux, every pristine check and every mutant runs in its own overlay view mounted at the worker: the whole project tree, read-only underneath, with the file being mutated written on top and build output such as `target/`, `.git/` and `.venv/` hidden. Whatever a test writes, next to its working directory or anywhere else in the project, lands in that view and is discarded with it: it reaches neither the project nor the next mutant. Imports and paths resolve inside the view, so Node and Cargo see the mutant without any copying. Workers are removed after success, setup failure, or runtime failure. See [ADR 0006](docs/adr/0006-mutants-run-in-overlay-views.md).
-
-The views need unprivileged user namespaces. mutator enters its own user and mount namespace at startup; mounts never leave it. When the system refuses one, mutator exits with status 1 and says how to allow them (on Ubuntu 23.10 and later, `sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0`).
+changes execution order only. On the supported host every pristine check and every
+mutant runs in its own copy of the project at the worker path, removed after the
+command, so whatever a test writes reaches neither the project nor the next mutant.
+[Native Windows](#native-windows) describes the copy and
+[ADR 0007](docs/adr/0007-windows-workers-run-in-copies.md) records it. The Linux
+overlay view is kept in the code and is not delivered;
+[docs/mutation-linux.md](docs/mutation-linux.md) is its record.
 
 Rust runs in worker slots, `target/mutation-workers/cargo-slot-<n>/`, whose paths stay the same across files and runs. Each slot mounts its views at `worker/`, and a slot target, `target/`, that every command in the slot uses as `CARGO_TARGET_DIR`. A mutant therefore rebuilds only the mutated crate and its dependants instead of the whole dependency tree. A new slot target starts as a copy of the project's `target/debug` when it exists (mtimes kept, reflinked where the filesystem allows); otherwise the slot builds cold once. Every mutated or restored source gets the current time as its mtime, and a package mutated by a previous file or run has its fingerprints removed from the slot target, so Cargo never reuses a mutant's build. A slot is locked for the run; a concurrent mutator on the same project takes the next free number. Slot targets are kept after the run and after an interrupt; `cargo clean` removes them with the rest of `target/`. See [ADR 0004](docs/adr/0004-rust-worker-slots-keep-cargo-target.md).
 
@@ -260,31 +278,14 @@ is treated as uncovered, and the run says so.
 
 Running crapper and then mutator does not run the coverage suite twice. Before it generates anything, mutator asks crapper which files' reports are still fresh, using `target/coverage/crapper-stamp.json`. A report counts as fresh when crapper's last coverage run of that language succeeded and covered the file, used the same `--coverage-command`, and nothing in the project has changed since (test files included). Fresh languages are reused, and the run prints `Reusing <languages> coverage from crapper's last run.` on stderr. Every other language is regenerated for all of its selected files, because one report covers a whole language. The baseline test run still always happens. `--use-existing-coverage` reads whatever is on disk without that check.
 
-## WSL2
+## Linux
 
-WSL2 with Ubuntu remains supported, with Linux namespace isolation. For
-native Windows setup and its declared copy isolation, see below.
-
-1. In an administrator PowerShell, run `wsl --install` and reboot.
-2. Open Ubuntu and clone into the Linux home directory, not `/mnt/c`.
-   Windows drives are slow under WSL2 and break symlinks:
-
-   ```bash
-   cd ~
-   git clone -b lua https://github.com/qinyuanj/crapper.git
-   git clone -b lua https://github.com/qinyuanj/mutator.git
-   ```
-
-3. Run `mutator/scripts/setup-ubuntu.sh`. It installs Python, Lua 5.4,
-   busted, luacov, cluacov 1.0.0, and luacov-reporter-lcov, then creates `.venv`.
-4. Edit in VS Code with the WSL extension (`code .` from Ubuntu).
-
-mutator warns when a WSL project is under `/mnt/`.
-
-Custom `--test-command` strings run through `/bin/sh`. The runner returns the
-test process's status, while the mutation CLI returns its aggregate statuses
-(`0`, `2`, or `3`) described above. A timed-out test command is killed by
-process group, which cleans up its descendants.
+Linux x64 is not a supported host. Its isolation and its setup stay in the code,
+unreachable from delivery: `isolation.for_platform` still hands Linux namespace
+views, `scripts/setup-ubuntu.sh` still installs the toolchain, and a run there still
+isolates every pristine check and mutant. `mutate` does not refuse Linux; the
+decision, its reason and the way back are in
+[docs/mutation-linux.md](docs/mutation-linux.md).
 
 ## Native Windows
 
@@ -322,7 +323,7 @@ Concurrent Rust runs hold different slot locks and keep separate slot targets.
 The summary reports `Isolation: copy` and the copy method/volume; snapshots
 carry `:isolation :copy`. Linux reports namespace views and writes
 `:isolation :namespace-view`. Snapshot paths stay POSIX-relative and bytes
-use UTF-8 LF on both hosts. On a ReFS Dev Drive with block refcounting on
+use UTF-8 LF on every host. On a ReFS Dev Drive with block refcounting on
 Windows 11 24H2+, Python's CopyFile2 automatically block-clones. Keep the
 project and its target directory on that volume. NTFS and older builds make
 full copies with the same results, at a higher cost for large dependencies.
@@ -335,12 +336,12 @@ symlinks become independent files; copying also breaks hardlinks. Unresolved
 links are refused. Native Lua distributions may not open non-ANSI paths. See
 [ADR 0007](docs/adr/0007-windows-workers-run-in-copies.md), which partially
 supersedes [ADR 0006](docs/adr/0006-mutants-run-in-overlay-views.md) for Windows.
-Linux still refuses to run when user namespaces are unavailable.
+The kept Linux path still refuses to run when user namespaces are unavailable.
 
 ## Development
 
-```bash
-python3 -m venv .venv
-.venv/bin/pip install -e '.[dev]'
-.venv/bin/pytest
+```text
+python -m venv .venv
+.venv\Scripts\python -m pip install -e ".[dev]"
+.venv\Scripts\python -m pytest
 ```

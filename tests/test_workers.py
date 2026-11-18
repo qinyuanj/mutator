@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from host import require_toolchain
 from mutator.workers import create_workers, run_mutants, worker_count
 from mutator.model import Site
 from mutator.runner import CommandRunner
@@ -120,8 +121,7 @@ def test_runtime_failure_removes_workers(tmp_path):
 def test_copied_node_relative_importers_execute_mutant(tmp_path):
     import shutil
     node = shutil.which("node")
-    if not node:
-        pytest.skip("Node unavailable")
+    require_toolchain(node is not None, "Node unavailable")
     (tmp_path / "src").mkdir()
     (tmp_path / "test").mkdir()
     source = tmp_path / "src" / "value.mjs"

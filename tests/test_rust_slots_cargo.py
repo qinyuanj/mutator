@@ -12,12 +12,15 @@ from pathlib import Path
 
 import pytest
 
+from host import require_toolchain
 from mutator.engine import mutate_file
 from mutator.runner import CommandRunner
 from mutator import workers
 from mutator.workers import WorkerSlots
 
-pytestmark = pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo unavailable")
+@pytest.fixture(autouse=True, scope="module")
+def _cargo():
+    require_toolchain(shutil.which("cargo") is not None, "cargo unavailable")
 
 FILES = {
     "Cargo.toml": '[workspace]\nmembers = ["app", "util"]\nresolver = "2"\n',
