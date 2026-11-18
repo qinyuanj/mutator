@@ -1,6 +1,6 @@
 """Repository rules that review kept catching by hand.
 
-Fast and tool-free, so the pre-commit hook runs them on every commit.
+Fast and tool-free, so CI runs them on every push to main and every pull request.
 """
 
 import ast

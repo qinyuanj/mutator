@@ -18,4 +18,4 @@ Single-context: `GLOSSARY.md` + `docs/adr/` at the repo root. See `docs/agents/d
 
 Working in a `git worktree` (parallel subagents): per-worktree venv, crapper sibling, PYTHONPATH pinning. See `docs/agents/worktrees.md`.
 
-Enable the versioned pre-commit hook once per clone with `git config core.hooksPath .githooks`; it runs `tests/test_guardrails.py` (process boundary, no CR in golden files).
+CI runs `tests/test_guardrails.py` (process boundary, no CR in golden files) as part of the full suite on every push to main and every pull request; run `.venv/Scripts/python.exe -m pytest tests/test_guardrails.py` before a commit that changes those rules.
