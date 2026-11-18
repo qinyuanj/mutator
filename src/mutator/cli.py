@@ -593,25 +593,6 @@ def _mutate_files(options: Options, root: Path, files: list[Path], indexes: dict
     return _finish(baseline_failed, changed, survived)
 
 
-# Windows 10 22H2. Older builds are refused before any work.
-MINIMUM_WINDOWS_BUILD = 19045
-
-
-def _windows_build() -> int | None:
-    return sys.getwindowsversion().build if sys.platform == "win32" else None
-
-
-def windows_refusal(platform: str, build: int | None) -> str | None:
-    """Why mutator will not run on this Windows build, or None when it will."""
-
-    if platform != "win32" or build is None or build >= MINIMUM_WINDOWS_BUILD:
-        return None
-    return (
-        f"mutator needs Windows 10 22H2 (build {MINIMUM_WINDOWS_BUILD}) or later; "
-        f"this is build {build}. Update Windows, or run mutator inside WSL2."
-    )
-
-
 def platform_warning(platform: str, root: Path) -> str | None:
     """Warn about slow Windows mounts under WSL."""
 
@@ -713,10 +694,6 @@ def run(argv: list[str] | None = None) -> int:
         print(missing, file=sys.stderr)
         return 2
     root = options.project_root.resolve()
-    refusal = windows_refusal(sys.platform, _windows_build())
-    if refusal:
-        print(refusal, file=sys.stderr)
-        return 1
     warning = platform_warning(sys.platform, root)
     if warning:
         print(warning, file=sys.stderr)

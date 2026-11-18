@@ -288,7 +288,8 @@ process group, which cleans up its descendants.
 
 ## Native Windows
 
-Windows 11 and Windows 10 22H2 (build 19045) or later are supported. Install
+Any Windows build runs: mutator decides on the operating system, not on a build
+number ([ADR 0008](docs/adr/0008-no-windows-build-number-gate.md)). Install
 Python 3.12+ (for CopyFile2 copies), git, and your project's native toolchain:
 Rust MSVC for `cfg(windows)` tests, Node/npm for TypeScript, Go, or Python.
 Keep a current crapper checkout beside mutator; crapper#10 supplies its
