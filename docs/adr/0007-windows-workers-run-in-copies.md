@@ -1,10 +1,12 @@
 # Windows workers run in declared copies
 
 This partially supersedes ADR 0006 **for native Windows only**, as required by
-mutator#27 and uml-viewer ADR 0010. Windows 10 22H2 (build 19045) and later run
-with copy isolation. Linux still uses private user/mount namespaces and
-fresh overlayfs views; if namespaces are refused it exits 1. There is no
-Linux fallback to copies. macOS isolation (#26) is a separate decision.
+mutator#27 and uml-viewer ADR 0010. The Windows build floor named here is
+removed by [ADR 0008](0008-no-windows-build-number-gate.md): every Windows build
+runs, and native Windows runs with copy isolation. Linux still uses private
+user/mount namespaces and fresh overlayfs views; if namespaces are refused it
+exits 1. There is no Linux fallback to copies. macOS isolation (#26) is a
+separate decision.
 
 Every pristine check and mutant gets a fresh project copy at the same worker
 path. The isolation seam owns prepare/view/remove/cleanup and environment

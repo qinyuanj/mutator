@@ -110,6 +110,22 @@ def _tracked(*pathspecs: str) -> list[str]:
     return [name for name in listed.stdout.decode("utf-8").split("\0") if name]
 
 
+def test_no_source_file_gates_on_a_windows_build_number():
+    """ADR 0008: the OS decides, never a build number, so no floor may return."""
+
+    source = ROOT / "src"
+    floor_tokens = ("MINIMUM_WINDOWS_BUILD", "MIN_WINDOWS_BUILD")
+    offenders = [
+        f"src/{path.relative_to(source).as_posix()}"
+        for path in sorted(source.rglob("*.py"))
+        if any(token in path.read_text(encoding="utf-8") for token in floor_tokens)
+    ]
+    assert not offenders, (
+        "These modules reintroduced a Windows build floor. ADR 0008 keeps only the OS decision: "
+        "any Windows build runs, and the Linux and macOS rules are unchanged:\n  " + "\n  ".join(offenders)
+    )
+
+
 def test_golden_files_are_checked_out_with_lf():
     crlf = [name for name in _tracked("tests/fixtures", "*.edn") if b"\r" in (ROOT / name).read_bytes()]
     assert not crlf, (

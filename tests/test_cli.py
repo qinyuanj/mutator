@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from mutator import isolation
-from mutator.cli import HELP, parse_args, run, windows_refusal
+from mutator.cli import HELP, parse_args, run
 from mutator.isolation import IsolationUnavailable
 from mutator.edn import loads
 from mutator.metrics import snapshot_path
@@ -266,14 +266,19 @@ def test_run_reports_a_missing_crapper(monkeypatch, capsys):
     assert capsys.readouterr().err == "crapper not found\n"
 
 
-def test_a_windows_build_before_22h2_is_refused_before_any_work(monkeypatch, tmp_path, capsys):
+def test_a_windows_build_below_the_old_floor_is_not_refused(monkeypatch, tmp_path, capsys):
+    """ADR 0008: the OS decides, not a build number; this build was refused until #30."""
+
+    class Build:
+        build = 19042
+
     monkeypatch.setattr("mutator.cli.sys.platform", "win32")
-    monkeypatch.setattr("mutator.cli._windows_build", lambda: 19044)
-    assert run(["--scan", "--no-coverage", "--root", str(tmp_path)]) == 1
+    monkeypatch.setattr(isolation, "_current", isolation.CopyViews())
+    monkeypatch.setattr(sys, "getwindowsversion", lambda: Build())
+    assert run(["--scan", "--no-coverage", "--root", str(tmp_path)]) == 0
     captured = capsys.readouterr()
-    assert captured.err == windows_refusal("win32", 19044) + "\n"
-    assert "build 19045" in captured.err
-    assert captured.out == ""
+    assert captured.out == "No source files to mutate.\n"
+    assert captured.err == ""
 
 
 def test_linux_without_user_namespaces_stops_instead_of_copying(monkeypatch, tmp_path, capsys):
