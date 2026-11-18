@@ -110,19 +110,27 @@ def _tracked(*pathspecs: str) -> list[str]:
     return [name for name in listed.stdout.decode("utf-8").split("\0") if name]
 
 
-def test_no_source_file_gates_on_a_windows_build_number():
-    """ADR 0008: the OS decides, never a build number, so no floor may return."""
+def test_no_source_file_gates_a_host_on_a_windows_build_number():
+    """ADR 0008: the OS decides, so no build-number gate may return.
+
+    A gate is a floor compared against the host's build before any work, and the
+    two constants below are how one is spelled. This bans the gate, not reading
+    the build: `isolation.py` reads `sys.getwindowsversion().build` on purpose,
+    to report which copy method the volume gets, and must keep doing so.
+    """
 
     source = ROOT / "src"
-    floor_tokens = ("MINIMUM_WINDOWS_BUILD", "MIN_WINDOWS_BUILD")
+    gate_tokens = ("MINIMUM_WINDOWS_BUILD", "MIN_WINDOWS_BUILD")
     offenders = [
         f"src/{path.relative_to(source).as_posix()}"
         for path in sorted(source.rglob("*.py"))
-        if any(token in path.read_text(encoding="utf-8") for token in floor_tokens)
+        if any(token in path.read_text(encoding="utf-8") for token in gate_tokens)
     ]
     assert not offenders, (
-        "These modules reintroduced a Windows build floor. ADR 0008 keeps only the OS decision: "
-        "any Windows build runs, and the Linux and macOS rules are unchanged:\n  " + "\n  ".join(offenders)
+        "These modules reintroduced a Windows build floor, which ADR 0008 removed: the OS decides, "
+        "any Windows build runs, and the Linux and macOS rules are unchanged. Reading the build to "
+        "report something (as isolation.py does for its copy method) is not a gate and stays:\n  "
+        + "\n  ".join(offenders)
     )
 
 
