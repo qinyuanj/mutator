@@ -116,13 +116,36 @@ def _retrying(action, path: Path) -> None:
             time.sleep(delay)
 
 
+def _long_path(path: Path) -> Path:
+    r"""The same path in Win32's \\?\ form, which has no length limit.
+
+    Win32 refuses any path longer than 260 characters unless it carries the
+    prefix, answering ERROR_PATH_NOT_FOUND for the rest. Cargo and rustc prefix
+    their own paths, so a worker copy can hold entries that deep; unlinking one
+    by its plain name then fails as "not found", which reads as "already
+    removed", and leaves the entry behind so its directory can never be
+    emptied (issue #17).
+    """
+
+    text = os.path.abspath(os.fspath(path))
+    if text.startswith("\\\\?\\"):
+        return Path(text)
+    if text.startswith("\\\\"):
+        # A UNC share keeps its server and share under the prefix's own UNC.
+        return Path("\\\\?\\UNC\\" + text[2:])
+    return Path("\\\\?\\" + text)
+
+
 def delete_tree(path: Path) -> None:
     """Remove worker data, unlinking links without visiting their targets.
 
     A mounted view is detached first; deleting through it would only fill its
-    writable layer.
+    writable layer. Windows walks the tree under its long-path prefix: a copy of
+    a project can be deeper than its plain path APIs reach.
     """
 
+    if WINDOWS:
+        path = _long_path(path)
     try:
         linked = is_link(path)
     except FileNotFoundError:
