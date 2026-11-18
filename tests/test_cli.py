@@ -274,7 +274,8 @@ def test_a_windows_build_below_the_old_floor_is_not_refused(monkeypatch, tmp_pat
 
     monkeypatch.setattr("mutator.cli.sys.platform", "win32")
     monkeypatch.setattr(isolation, "_current", isolation.CopyViews())
-    monkeypatch.setattr(sys, "getwindowsversion", lambda: Build())
+    # Linux has no sys.getwindowsversion; the stub only documents that the build number is ignored.
+    monkeypatch.setattr(sys, "getwindowsversion", lambda: Build(), raising=False)
     assert run(["--scan", "--no-coverage", "--root", str(tmp_path)]) == 0
     captured = capsys.readouterr()
     assert captured.out == "No source files to mutate.\n"
