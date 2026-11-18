@@ -24,17 +24,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      # Lua 5.4 and the LuaRocks tree the Lua tests need. With
+      # Lua 5.4 and the LuaRocks tree the Lua tests need, from this repository's
+      # own installer rather than third-party actions: it is the same recipe
+      # crapper and dsh-uml-viewer install, it proves the toolchain before the
+      # suite runs, and it is the documented local Windows path in AGENTS.md. With
       # MUTATOR_REQUIRE_TOOLCHAINS=1 a failed install fails the job instead of
       # turning those tests into skips.
-      - uses: leafo/gh-actions-lua@v10
-        with:
-          luaVersion: "5.4"
-      - uses: leafo/gh-actions-luarocks@v4
-      - run: luarocks install busted
-      - run: luarocks install luacov
-      - run: luarocks install cluacov 1.0.0-1
-      - run: luarocks install luacov-reporter-lcov
+      - name: Lua 5.4 fixture toolchain
+        run: ./scripts/setup-windows.ps1
       - run: python -m pip install -e ".[dev]"
         working-directory: mutator
       - run: python -m pytest -q -rs
