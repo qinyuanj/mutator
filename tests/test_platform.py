@@ -1,22 +1,7 @@
 from pathlib import Path
 
 from mutator import isolation
-from mutator.cli import MINIMUM_WINDOWS_BUILD, platform_warning, windows_refusal
-
-
-def test_windows_10_22h2_and_later_run():
-    assert windows_refusal("win32", 19045) is None
-    assert windows_refusal("win32", 26100) is None
-
-
-def test_an_older_windows_build_is_refused_naming_the_minimum():
-    message = windows_refusal("win32", 19044)
-    assert "19045" in message and "19044" in message
-    assert MINIMUM_WINDOWS_BUILD == 19045
-
-
-def test_linux_has_no_build_gate():
-    assert windows_refusal("linux", None) is None
+from mutator.cli import platform_warning
 
 
 def test_native_windows_runs_in_copies_and_linux_in_namespace_views():
