@@ -174,10 +174,12 @@ without Busted's shell-based `--lua` re-execution. Busted configuration and
 failure exit codes are preserved; baseline tests do not enable coverage.
 
 The generated Lua command confines module search paths to the LuaRocks trees
-reported by `luarocks config rocks_trees`, passed through the environment so
+reported by `luarocks config rocks_trees` plus the user tree
+`~/.luarocks` (`%USERPROFILE%\.luarocks`), where `scripts/setup-windows.ps1`
+keeps `luacov-reporter-lcov`; they are passed through the environment so
 nested test subprocesses inherit them. Inherited `LUA_PATH` entries survive
-when they are relative or inside a tree. Nothing is pinned unless busted
-itself resolves inside a tree; `MUTATOR_LUA_NO_PIN=1` opts out. The command's
+when they are relative or inside one of those trees. Nothing is pinned unless
+busted itself resolves inside a tree; `MUTATOR_LUA_NO_PIN=1` opts out. The command's
 bootstrap also caches compiled chunks (`string.dump`, keyed by chunk name and
 content) and, on Lua 5.4 with Busted 2.3.0, replaces the per-element
 `debug.traceback` with a Lua-side version that formats only the frames busted

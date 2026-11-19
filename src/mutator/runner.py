@@ -717,6 +717,25 @@ def _absolute(entry: str) -> bool:
     return entry.startswith("/")
 
 
+def _user_rock_tree() -> str | None:
+    """The tree scripts/setup-windows.ps1 keeps luacov-reporter-lcov in, or None.
+
+    `luarocks config rocks_trees` reports the trees LuaRocks was configured
+    with, and on Windows that is the deploy tree alone (%APPDATA%\\luarocks).
+    The installer deliberately keeps the LCOV reporter out of that tree and in
+    the user tree (%USERPROFILE%\\.luarocks), so the coverage-gate tests' stub
+    `./luacov/reporter/lcov.lua` is reached first on both platforms. Resolution
+    has to look in the user tree too, or a correctly installed reporter is
+    invisible. On Unix the user tree is normally one LuaRocks already reports,
+    so this only adds a tree LuaRocks does not.
+    """
+
+    tree = Path.home() / ".luarocks"
+    if not tree.is_dir():
+        return None
+    return tree.as_posix()
+
+
 def _rocks_trees() -> list[str]:
     """The machine's LuaRocks 5.4 trees, or [] when luarocks is unusable."""
 
@@ -734,11 +753,21 @@ def _rocks_trees() -> list[str]:
             except (OSError, subprocess.TimeoutExpired):
                 result = None
         if result is not None and result.returncode == 0:
-            _LUA_TREES = [
+            found = [
                 match.replace("\\", "/") if WINDOWS else match
                 for match in re.findall(r'"([^"]+)"', result.stdout)
                 if _absolute(match)
             ]
+            user = _user_rock_tree()
+            if user is not None:
+                # After the reported trees: a module installed into both is the
+                # deploy tree's copy, which the installer calls the shadow.
+                found.append(user)
+            # One spelling per tree: LuaRocks may report either separator.
+            seen: dict[str, str] = {}
+            for tree in found:
+                seen.setdefault(os.path.normcase(tree).replace("\\", "/"), tree)
+            _LUA_TREES = list(seen.values())
     return _LUA_TREES
 
 

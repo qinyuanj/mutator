@@ -30,6 +30,37 @@ def require_toolchain(ready: bool, reason: str) -> None:
     pytest.skip(reason)
 
 
+def lua_utf8_name_gap(lua: str, directory: Path) -> str | None:
+    """Why this Lua cannot open a UTF-8 file name from UTF-8 source, or None.
+
+    A native Lua distribution may take the ANSI code page for file names (ADR
+    0007: "Native Lua may be unable to open non-ANSI source paths"), so a
+    module named in a UTF-8 specification is unopenable unless that code page
+    is UTF-8. LuaCov's untested-file scan goes through the same APIs, so a
+    selected-but-unrequired source named that way gets no zero-hit record
+    either. Measured with the loadfile a specification's `require` performs,
+    so the stated reason is this host's behaviour and not a platform guess.
+    """
+
+    probe = directory / "utf8-name-probe"
+    probe.mkdir(parents=True, exist_ok=True)
+    name = "probe \u00fc.lua"
+    (probe / name).write_text("return 1\n", encoding="utf-8")
+    script = probe / "probe.lua"
+    script.write_text(f"io.write(tostring(loadfile([==[{name}]==]) ~= nil))\n", encoding="utf-8")
+    result = subprocess.run([lua, script.name], cwd=probe, capture_output=True)
+    if result.returncode == 0 and result.stdout == b"true":
+        return None
+    return (
+        f"Lua cannot open the UTF-8 file name {name!r} on this host, so a UTF-8 "
+        "module is not requireable and LuaCov records no zero-hit entry for one: "
+        "a native Lua distribution may take the ANSI code page for file names "
+        "(ADR 0007). Passing needs a Lua that opens UTF-8 names - the Windows "
+        "UTF-8 code page option, or a distribution that calls the wide-char "
+        "APIs. Stated here, not skipped silently (#16 item 3, #18)."
+    )
+
+
 def shell_command(argv: list[str]) -> str:
     """``argv`` as one command string for the host shell (sh or cmd.exe)."""
 

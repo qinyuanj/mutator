@@ -38,6 +38,9 @@
     stub ./luacov/reporter/lcov.lua and require that stub to load. Windows
     repeats the split and deletes any deploy-tree copy, so both platforms have
     one shape; LUA_PATH starts with ./?.lua, so a stub is reached first anyway.
+    mutator's resolution reads both trees: it adds $USERPROFILE\.luarocks to
+    what `luarocks config rocks_trees` reports, so the place this installs is
+    the place the coverage layer looks.
 
     Provenance: this is the same recipe crapper's scripts/setup-windows.ps1
     established (crapper#3, ADR 0004 there) and dsh-uml-viewer's
