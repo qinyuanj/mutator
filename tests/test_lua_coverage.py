@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from host import lua_utf8_name_gap, require_toolchain
 from mutator.crapper_link import ensure_crapper
 from mutator.lua_coverage import LuaCoverageIndex, _decode, _literal, collect, load
 from mutator.runner import CommandRunner, _rocks_trees
@@ -42,12 +43,29 @@ def project(tmp_path):
     return directory, source
 
 
+def _extend_search_path(monkeypatch, name: str, templates: list[str]) -> None:
+    """Prepend ``templates`` to a Lua search path, keeping the entries it had.
+
+    A machine can hold a rock tree mutator cannot discover, and replacing the
+    variable would hide it; that is how a correctly installed LCOV reporter
+    went missing. Lua prefers ``_5_4`` over the plain name, so both move
+    together when the host exports both.
+    """
+
+    names = [name] + ([f"{name}_5_4"] if f"{name}_5_4" in os.environ else [])
+    inherited = [
+        entry for alias in names for entry in os.environ.get(alias, "").split(";") if entry
+    ]
+    value = ";".join(dict.fromkeys([*templates, *inherited])) + ";;"
+    for alias in names:
+        monkeypatch.setenv(alias, value)
+
+
 @pytest.fixture
 def toolchain(monkeypatch):
     runners = ensure_crapper().runners
     lua = runners.lua_interpreter()
-    if lua is None:
-        pytest.skip("Lua 5.4 unavailable")
+    require_toolchain(lua is not None, "Lua 5.4 unavailable")
     # A local rock tree can provide the required native hook without changing
     # or executing any project that owns that tree.
     checkout = Path(__file__).resolve().parents[1]
@@ -58,27 +76,32 @@ def toolchain(monkeypatch):
             git_directory = checkout / git_directory
         checkout = git_directory.resolve().parents[2]
     # The machine's LuaRocks trees too, the ones mutator pins for its own runs.
+    library = "dll" if sys.platform == "win32" else "so"
     trees = [Path(tree) for tree in _rocks_trees()]
     trees.append(checkout.parent / "monopoly" / ".toolcache" / "luarocks")
     setup = ""
     for tree in trees:
         if tree.is_dir():
             setup += f"package.path = {json.dumps(tree.as_posix() + '/share/lua/5.4/?.lua;')} .. package.path; "
-            setup += f"package.cpath = {json.dumps(tree.as_posix() + '/lib/lua/5.4/?.so;')} .. package.cpath; "
+            setup += f"package.cpath = {json.dumps(tree.as_posix() + f'/lib/lua/5.4/?.{library};')} .. package.cpath; "
     probe = CommandRunner().run(
         [lua, "-e", setup + "require('busted.runner'); require('luacov.reporter.lcov'); "
          + "require('cluacov.hook'); print('ready')"],
         Path(__file__).parent, 15,
     )
-    if probe.code != 0:
-        pytest.skip(f"Busted/LuaCov/cluacov toolchain unavailable: {probe.output}")
+    require_toolchain(
+        probe.code == 0, f"Busted/LuaCov/cluacov toolchain unavailable: {probe.output}"
+    )
     # Runs that start a bare interpreter (the collector profile) search the
     # same trees as the probe; Lua's defaults would miss a user tree's dkjson.
     found = [tree.as_posix() for tree in trees if tree.is_dir()]
     if found:
-        library = "dll" if sys.platform == "win32" else "so"
-        monkeypatch.setenv("LUA_PATH", ";".join(f"{tree}/share/lua/5.4/?.lua" for tree in found) + ";;")
-        monkeypatch.setenv("LUA_CPATH", ";".join(f"{tree}/lib/lua/5.4/?.{library}" for tree in found) + ";;")
+        _extend_search_path(
+            monkeypatch, "LUA_PATH", [f"{tree}/share/lua/5.4/?.lua" for tree in found]
+        )
+        _extend_search_path(
+            monkeypatch, "LUA_CPATH", [f"{tree}/lib/lua/5.4/?.{library}" for tree in found]
+        )
     return runners
 
 
@@ -105,7 +128,9 @@ def test_real_suite_attributes_loads_and_independent_functions(project, toolchai
 
 def test_selected_unrequired_source_and_scope_cache_identity(project, toolchain):
     root, source = project
-    suffix = "unused ' ü]==].lua"
+    # Quotes and brackets are the escaping this asserts; a UTF-8 name is a
+    # recorded host limit, stated by the test below.
+    suffix = "unused ' ]==].lua"
     unused = root / "src" / suffix
     unused.write_text("local M = {}\nfunction M.zero()\n return 99\nend\nreturn M\n", encoding="utf-8")
     broken = root / ".claude" / "worktrees" / "broken"
@@ -120,6 +145,26 @@ def test_selected_unrequired_source_and_scope_cache_identity(project, toolchain)
     zero = next(lines for name, lines in fresh.items() if Path(name).resolve() == unused.resolve())
     assert zero and all(hits == 0 for hits, _ in zero.values())
     assert not any("broken" in name for name in fresh)
+
+
+def test_utf8_zero_hit_record_is_a_stated_limit(project, toolchain, tmp_path):
+    """#18: LuaCov's untested-file scan inherits Lua's ANSI code-page limit.
+
+    The same zero-hit assertion runs where a native Lua opens a UTF-8 name;
+    where it cannot, the measured reason is stated and cites ADR 0007 instead
+    of the case disappearing silently.
+    """
+
+    root, source = project
+    gap = lua_utf8_name_gap(toolchain.lua_interpreter(), tmp_path)
+    if gap is not None:
+        pytest.skip(gap)
+    unused = root / "src" / "unused ' ü]==].lua"
+    unused.write_text("local M = {}\nfunction M.zero()\n return 99\nend\nreturn M\n", encoding="utf-8")
+    collect(root, source, source_files=[source, unused])
+    fresh = toolchain._fresh_lcov(toolchain._coverage_report(root, root, "lua"), root)
+    zero = next(lines for name, lines in fresh.items() if Path(name).resolve() == unused.resolve())
+    assert zero and all(hits == 0 for hits, _ in zero.values())
 
 
 def test_spec_duration_includes_elapsed_sleep(project, toolchain):
@@ -475,12 +520,37 @@ def test_packed_memberships_cross_byte_and_word_boundaries(tmp_path, toolchain):
 
 def test_streamed_publication_escapes_source_names(project, toolchain):
     root, source = project
-    # See the narrow-path note above; quotes and brackets still exercise escaping.
-    name = 'calc [quoted] ü.lua'
+    # Brackets exercise escaping here; a UTF-8 name is a recorded host limit,
+    # stated by the test below (ADR 0007: Lua may take the ANSI code page).
+    name = 'calc [quoted].lua'
     unusual = source.with_name(name)
     source.rename(unusual)
     for spec in (root / 'spec').glob('*.lua'):
         spec.write_text(spec.read_text(encoding='utf-8').replace("require('calc')", f"require('{unusual.stem}')"), encoding='utf-8')
+    index = collect(root, unusual)
+    assert index.select(unusual, 3) == ['spec/first_spec.lua']
+    assert index.select(unusual, 6) == ['spec/second_spec.lua']
+
+
+def test_utf8_module_name_is_a_stated_limit(project, toolchain, tmp_path):
+    """#18: a UTF-8 module name needs a Lua that opens UTF-8 file names.
+
+    The probe is the loadfile a specification's `require` performs. Where it
+    succeeds the whole pipeline must work; where it fails the measured reason
+    is stated with ADR 0007's limit, instead of a silent skip.
+    """
+
+    root, source = project
+    gap = lua_utf8_name_gap(toolchain.lua_interpreter(), tmp_path)
+    if gap is not None:
+        pytest.skip(gap)
+    unusual = source.with_name('calc [quoted] ü.lua')
+    source.rename(unusual)
+    for spec in (root / 'spec').glob('*.lua'):
+        spec.write_text(
+            spec.read_text(encoding='utf-8').replace("require('calc')", f"require('{unusual.stem}')"),
+            encoding='utf-8',
+        )
     index = collect(root, unusual)
     assert index.select(unusual, 3) == ['spec/first_spec.lua']
     assert index.select(unusual, 6) == ['spec/second_spec.lua']

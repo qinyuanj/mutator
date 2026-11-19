@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from host import require_toolchain
 from mutator.crapper_link import ensure_crapper
 from mutator.runner import CommandRunner
 from mutator.runner import test_plan as command_for
@@ -12,13 +13,14 @@ from mutator.runner import test_plan as command_for
 @pytest.fixture
 def lua(runners=None):
     interpreter = ensure_crapper().runners.lua_interpreter()
-    if interpreter is None:
-        pytest.skip("Lua 5.4 unavailable")
-    if not any(
-        (Path(tree) / "share/lua/5.4/busted/runner.lua").is_file()
-        for tree in _trees()
-    ):
-        pytest.skip("Busted unavailable in the LuaRocks trees")
+    require_toolchain(interpreter is not None, "Lua 5.4 unavailable")
+    require_toolchain(
+        any(
+            (Path(tree) / "share/lua/5.4/busted/runner.lua").is_file()
+            for tree in _trees()
+        ),
+        "Busted unavailable in the LuaRocks trees",
+    )
     return interpreter
 
 

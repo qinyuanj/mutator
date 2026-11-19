@@ -40,3 +40,14 @@ A Rust worker position with a fixed number and path that persists across files a
 
 **slot target**:
 The Cargo build output owned by one worker slot and kept across runs.
+
+## Isolation
+
+**copy isolation**:
+The delivered mechanism: a fresh copy of the project per pristine check and mutant,
+removed after the command. Native Windows x64 is the only host that runs it.
+
+**namespace view**:
+The Linux mechanism: one overlayfs view per command inside mutator's private user and
+mount namespace. It is kept in the code, is not delivered on any supported host, and
+exists as the only way back to Linux ([docs/mutation-linux.md](docs/mutation-linux.md)).

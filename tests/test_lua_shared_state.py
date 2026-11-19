@@ -6,6 +6,7 @@ assertions, but pristine subset checks cannot guarantee parity for shared state.
 
 import pytest
 
+from host import require_toolchain
 from mutator.crapper_link import ensure_crapper
 from mutator.engine import mutate_file
 from mutator.lua_coverage import collect
@@ -22,16 +23,14 @@ def _pinned(directory):
 def test_shared_cached_result_keeps_full_suite_kills(tmp_path):
     runners = ensure_crapper().runners
     lua = runners.lua_interpreter()
-    if lua is None:
-        pytest.skip("Lua 5.4 unavailable")
+    require_toolchain(lua is not None, "Lua 5.4 unavailable")
     runner = CommandRunner()
     probe = runner.run(
         [*_pinned(tmp_path), lua, "-e",
          "require('busted.runner'); require('luacov.reporter.lcov'); require('dkjson')"],
         tmp_path, 15,
     )
-    if probe.code != 0:
-        pytest.skip(f"Busted/LuaCov toolchain unavailable: {probe.output}")
+    require_toolchain(probe.code == 0, f"Busted/LuaCov toolchain unavailable: {probe.output}")
 
     source = tmp_path / "calc.lua"
     original = (
@@ -83,16 +82,14 @@ def test_shared_cached_result_keeps_full_suite_kills(tmp_path):
 def test_opted_in_selection_can_kill_full_suite_survivor_with_shared_state(tmp_path):
     runners = ensure_crapper().runners
     lua = runners.lua_interpreter()
-    if lua is None:
-        pytest.skip("Lua 5.4 unavailable")
+    require_toolchain(lua is not None, "Lua 5.4 unavailable")
     runner = CommandRunner()
     probe = runner.run(
         [*_pinned(tmp_path), lua, "-e",
          "require('busted.runner'); require('luacov.reporter.lcov'); require('dkjson')"],
         tmp_path, 15,
     )
-    if probe.code != 0:
-        pytest.skip(f"Busted/LuaCov toolchain unavailable: {probe.output}")
+    require_toolchain(probe.code == 0, f"Busted/LuaCov toolchain unavailable: {probe.output}")
 
     source = tmp_path / "calc.lua"
     original = (

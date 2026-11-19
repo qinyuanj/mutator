@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from host import WINDOWS, link_directory, remove_directory_link
+from host import WINDOWS, link_directory, remove_directory_link, require_toolchain
 from mutator.isolation import IsolationUnavailable
 from mutator.model import Site
 from mutator.runner import CommandResult
@@ -63,8 +63,7 @@ def test_real_lua_multifile_reuse_preserves_loader_binding(tmp_path):
     from mutator.crapper_link import ensure_crapper
     from mutator.runner import CommandRunner
     lua = ensure_crapper().runners.lua_interpreter()
-    if lua is None:
-        pytest.skip("native Lua interpreter unavailable")
+    require_toolchain(lua is not None, "native Lua interpreter unavailable")
     sources = fixture(tmp_path)
     script = (
         "package.path = './src/?.lua;' .. package.path; "

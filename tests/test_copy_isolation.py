@@ -2,12 +2,13 @@
 
 import shutil
 import sys
+from pathlib import Path
 
 import pytest
 
 from host import WINDOWS
 from mutator import isolation
-from mutator.isolation import CopyViews, copy_method
+from mutator.isolation import CopyViews, copy_method, delete_tree
 from mutator.model import Site
 from mutator.runner import CommandRunner
 from mutator.workers import run_mutants
@@ -248,3 +249,63 @@ def test_the_declared_isolation_names_the_copy_method_and_volume(tmp_path):
     assert described.startswith("copy (a fresh ")
     method = copy_method(filesystem, flags, sys.getwindowsversion().build)
     assert f"{method} of the project per command on {filesystem})" in described
+
+
+# A file name long enough that a plainly named path to it passes MAX_PATH while
+# the directories above it stay short enough for mkdir.
+_OVER_LIMIT_NAME = "fingerprint-" + "0" * 50
+
+
+def _an_entry_past_the_path_limit(root: Path) -> Path:
+    """A file under root whose plain Windows path is over 260 characters.
+
+    Cargo and rustc prefix every path they touch, so a worker copy can hold
+    entries this deep even where Win32's plain path APIs stop at 260.
+    """
+
+    deepest = root
+    while len(str(deepest)) + 1 + len(_OVER_LIMIT_NAME) <= 260:
+        deepest = deepest / "deep-0123456789"
+    deepest.mkdir(parents=True)
+    plain = deepest / _OVER_LIMIT_NAME
+    Path("\\\\?\\" + str(plain)).write_bytes(b"fingerprint")
+    return plain
+
+
+@pytest.mark.skipif(not WINDOWS, reason="the 260-character limit is Win32's")
+def test_a_worker_copy_entry_past_the_path_limit_does_not_block_teardown(tmp_path):
+    worker = tmp_path / "run-0123456789abcdef" / "worker-0"
+    worker.mkdir(parents=True)
+    long_entry = _an_entry_past_the_path_limit(worker)
+    assert len(str(long_entry)) > 260
+
+    delete_tree(worker)
+
+    assert not worker.exists()
+
+
+@pytest.mark.skipif(not WINDOWS, reason="the long-path prefix is Win32's own form")
+def test_deletion_walks_under_the_win32_long_path_prefix(tmp_path):
+    assert str(isolation._long_path(tmp_path / "a")).startswith("\\\\?\\")
+    # Recursion hands down paths that already carry it; they are not re-wrapped.
+    once = isolation._long_path(tmp_path / "a")
+    assert isolation._long_path(once) == once
+
+
+@pytest.mark.skipif(not WINDOWS, reason="only Windows refuses to delete an open file")
+def test_teardown_still_raises_when_a_file_is_really_held(tmp_path, monkeypatch):
+    # One attempt: the delays cover a scanner or a just-ended process that lets
+    # go within seconds, not a handle that is held.
+    monkeypatch.setattr(isolation, "_DELETE_DELAYS", ())
+    worker = tmp_path / "worker-0"
+    worker.mkdir()
+    held = worker / "held.txt"
+    held.write_bytes(b"fingerprint")
+
+    with held.open("rb"):  # Python's handle denies FILE_SHARE_DELETE
+        with pytest.raises(PermissionError):
+            delete_tree(worker)
+
+    delete_tree(worker)
+    assert not worker.exists()
+
