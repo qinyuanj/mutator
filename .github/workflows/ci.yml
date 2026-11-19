@@ -32,6 +32,9 @@ jobs:
       # turning those tests into skips.
       - name: Lua 5.4 fixture toolchain
         run: ./scripts/setup-windows.ps1
+        # This repository is checked out into mutator/ so crapper can be its
+        # sibling; the installer lives at the checkout root, one level down.
+        working-directory: mutator
       - run: python -m pip install -e ".[dev]"
         working-directory: mutator
       - run: python -m pytest -q -rs
