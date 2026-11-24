@@ -506,18 +506,26 @@ def _invalidate(root: Path, target: Path, relative: str) -> None:
     if not target.is_dir():
         return
     name = _package_name(root, relative)
+    # Cargo <= 1.99 keeps <pkg>-<hash> fingerprints under <profile>/.fingerprint.
     entries = [entry for fingerprints in [*target.glob("*/.fingerprint"), *target.glob("*/*/.fingerprint")]
                for entry in fingerprints.iterdir()]
     pattern = re.compile(re.escape(name or "") + r"-[0-9a-f]{16}")
     matched = [entry for entry in entries if name is not None and pattern.fullmatch(entry.name)]
-    if entries and not matched:
+    # Cargo >= 1.100 build-dir layout stores each unit, fingerprint included, at
+    # <profile>/build/<pkg>/<hash>/fingerprint -- no .fingerprint directory, and
+    # the hash directory is <hash> alone rather than <pkg>-<hash>. Match by the
+    # package directory name so a mutant build of that crate is invalidated.
+    all_build = list(target.glob("*/build/*/*/fingerprint"))
+    build_matched = [fp for fp in all_build
+                     if name is not None and fp.parent.parent.name == name]
+    if (entries or all_build) and not matched and not build_matched:
         # An unrecognised package or fingerprint layout: a cold build is
         # slower, a reused mutant build is wrong.
         print(f"Cannot find the Cargo fingerprints of {relative} in {target}; "
               "discarding the slot target.", file=sys.stderr)
         delete_tree(target)
         return
-    for entry in matched:
+    for entry in [*matched, *build_matched]:
         # delete_tree walks Win32's long-path prefix: a slot target on a deep
         # project holds fingerprints deeper than shutil.rmtree can unlink, left
         # "not empty" (issue #33).

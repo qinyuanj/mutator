@@ -10,7 +10,13 @@ import pytest
 from host import symlink_file
 from mutator.runner import CommandRunner
 from mutator.model import Site
-from mutator.workers import WorkerSlots, discard_overlays, new_run_dir, run_mutants
+from mutator.workers import (
+    WorkerSlots,
+    _invalidate,
+    discard_overlays,
+    new_run_dir,
+    run_mutants,
+)
 
 
 def project(root):
@@ -44,6 +50,52 @@ def test_a_run_directory_leaves_room_for_cargo_output_under_max_path(tmp_path):
         f"a run directory adds {added} characters, so at a 110-character CI "
         f"project root the deepest Cargo artifact is {110 + added}; shorten it"
     )
+
+
+
+def _package_tree(tmp_path, package):
+    (tmp_path / package).mkdir(parents=True, exist_ok=True)
+    (tmp_path / package / "Cargo.toml").write_text(
+        f'[package]\nname = "{package}"\nversion = "0.1.0"\n', encoding="utf-8")
+
+
+def test_invalidate_removes_build_dir_fingerprints(tmp_path):
+    """Cargo 1.100 keeps each unit at <profile>/build/<pkg>/<hash>/fingerprint. 
+
+    There is no .fingerprint directory and the hash directory is <hash>, not
+    <pkg>-<hash> (issue #33), so only deleting that unit directory forces the
+    crate to rebuild instead of reusing a mutant build.
+    """
+    _package_tree(tmp_path, "util")
+    _package_tree(tmp_path, "app")
+    target = tmp_path / "target"
+    util_fp = target / "debug" / "build" / "util" / ("0" * 16) / "fingerprint"
+    util_fp.mkdir(parents=True)
+    (util_fp / "lib-util").write_text("x", encoding="utf-8")
+    app_fp = target / "debug" / "build" / "app" / ("1" * 16) / "fingerprint"
+    app_fp.mkdir(parents=True)
+
+    _invalidate(tmp_path, target, "util/src/lib.rs")
+
+    assert not util_fp.exists()
+    assert app_fp.exists()
+
+
+def test_invalidate_removes_legacy_dot_fingerprints(tmp_path):
+    """Cargo <= 1.99 keeps <pkg>-<hash> under <profile>/.fingerprint."""
+    _package_tree(tmp_path, "util")
+    _package_tree(tmp_path, "app")
+    target = tmp_path / "target"
+    legacy = target / "debug" / ".fingerprint"
+    util_fp = legacy / ("util-" + "0" * 16)
+    util_fp.mkdir(parents=True)
+    app_fp = legacy / ("app-" + "1" * 16)
+    app_fp.mkdir(parents=True)
+
+    _invalidate(tmp_path, target, "util/src/lib.rs")
+
+    assert not util_fp.exists()
+    assert app_fp.exists()
 
 
 def test_two_concurrent_runs_get_different_slot_numbers(tmp_path):
