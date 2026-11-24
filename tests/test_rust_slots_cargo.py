@@ -13,8 +13,8 @@ from pathlib import Path
 import pytest
 
 from host import require_toolchain
-from mutator.engine import mutate_file
-from mutator.runner import CommandRunner
+from mutator.engine import _remember_baseline, mutate_file
+from mutator.runner import CommandResult, CommandRunner
 from mutator import workers
 from mutator.workers import WorkerSlots
 
@@ -30,7 +30,11 @@ FILES = {
                            "    assert!(!util::below(10));\n}\n",
     "app/Cargo.toml": '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n\n'
                       '[dependencies]\nutil = { path = "../util" }\nextdep = { path = "EXTDEP" }\n',
-    "app/src/lib.rs": "pub mod more;\n\npub fn twice(x: i64) -> i64 {\n    x + x\n}\n",
+    # Both path dependencies are used from the library, so Cargo sees no
+    # test-only-dependency warning (the baseline must not fail on warnings).
+    # The artifact layout is Cargo's, not the manifest's: Cargo 1.100 lays
+    # rlibs under debug/build/<pkg>/<hash>/out regardless of the section.
+    "app/src/lib.rs": "pub mod more;\npub use extdep::id;\npub use util::below;\n\npub fn twice(x: i64) -> i64 {\n    x + x\n}\n",
     "app/src/more.rs": "pub fn half(x: i64) -> i64 {\n    x / 2\n}\n",
     "app/tests/app.rs": "#[test]\nfn app() {\n    assert_eq!(app::twice(3), 6);\n"
                         "    assert_eq!(app::more::half(8), 4);\n"
@@ -134,3 +138,24 @@ def test_slot_targets_survive_the_run_and_overlays_do_not(tmp_path):
     assert (slot / "target" / "debug").is_dir()
     assert not (slot / "worker").exists()
     assert not workers._held_slots
+
+
+def test_a_warning_only_cargo_output_is_a_successful_baseline():
+    class WarningRunner:
+        def run(self, command, cwd, timeout):
+            return CommandResult(
+                code=0,
+                timed_out=False,
+                seconds=0.01,
+                output=(
+                    "warning: `app` (manifest) generated 2 warnings\n"
+                    "help: to still use for development builds, move to `dev-dependencies`\n"
+                ),
+            )
+
+    cache_key = (("cargo", "test"), "project")
+    baselines = {}
+    _remember_baseline(baselines, cache_key, WarningRunner(), ["cargo", "test"], Path("project"))
+    ok, _seconds, tail = baselines[cache_key]
+    assert ok is True
+    assert tail == ""

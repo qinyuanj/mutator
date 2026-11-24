@@ -53,7 +53,7 @@ _created_runs: set[Path] = set()
 def new_run_dir(root: Path) -> Path:
     workers = root / "target" / "mutation-workers"
     isolation.current().sweep(workers)
-    directory = workers / f"run-{uuid.uuid4()}"
+    directory = workers / f"run-{uuid.uuid4().hex[:12]}"
     directory.mkdir(parents=True)
     _created_runs.add(directory)
     isolation.current().claim_run(directory)
@@ -431,7 +431,16 @@ def _copy_build(source: Path, destination: Path, cwd: Path) -> str:
     if sys.platform == "win32":
         # copy2 is CopyFile2: mtimes kept, block-cloned where the volume can.
         try:
-            shutil.copytree(source, destination, symlinks=True, copy_function=shutil.copy2)
+            # Python copies by plain Win32 paths, which stop at 260 characters,
+            # but a build tree can be deeper (Cargo/rustc prefix their own).
+            # Copy under the long-path prefix or the seed fails and the slot
+            # builds cold on every file (issue #33).
+            source_arg = isolation._long_path(source) if isolation.WINDOWS else source
+            destination_arg = (
+                isolation._long_path(destination) if isolation.WINDOWS else destination
+            )
+            shutil.copytree(source_arg, destination_arg, symlinks=True,
+                            copy_function=shutil.copy2)
         except (OSError, shutil.Error) as exc:
             return str(exc)
         return ""
@@ -462,7 +471,10 @@ def _seed(root: Path, target: Path) -> None:
               file=sys.stderr)
         delete_tree(partial)
         return
-    partial.rename(target)
+    if isolation.WINDOWS:
+        os.rename(isolation._long_path(partial), isolation._long_path(target))
+    else:
+        partial.rename(target)
 
 
 def _package_name(root: Path, relative: str) -> str | None:
@@ -494,19 +506,30 @@ def _invalidate(root: Path, target: Path, relative: str) -> None:
     if not target.is_dir():
         return
     name = _package_name(root, relative)
+    # Cargo <= 1.99 keeps <pkg>-<hash> fingerprints under <profile>/.fingerprint.
     entries = [entry for fingerprints in [*target.glob("*/.fingerprint"), *target.glob("*/*/.fingerprint")]
                for entry in fingerprints.iterdir()]
     pattern = re.compile(re.escape(name or "") + r"-[0-9a-f]{16}")
     matched = [entry for entry in entries if name is not None and pattern.fullmatch(entry.name)]
-    if entries and not matched:
+    # Cargo >= 1.100 build-dir layout stores each unit, fingerprint included, at
+    # <profile>/build/<pkg>/<hash>/fingerprint -- no .fingerprint directory, and
+    # the hash directory is <hash> alone rather than <pkg>-<hash>. Match by the
+    # package directory name so a mutant build of that crate is invalidated.
+    all_build = list(target.glob("*/build/*/*/fingerprint"))
+    build_matched = [fp for fp in all_build
+                     if name is not None and fp.parent.parent.name == name]
+    if (entries or all_build) and not matched and not build_matched:
         # An unrecognised package or fingerprint layout: a cold build is
         # slower, a reused mutant build is wrong.
         print(f"Cannot find the Cargo fingerprints of {relative} in {target}; "
               "discarding the slot target.", file=sys.stderr)
         delete_tree(target)
         return
-    for entry in matched:
-        shutil.rmtree(entry)
+    for entry in [*matched, *build_matched]:
+        # delete_tree walks Win32's long-path prefix: a slot target on a deep
+        # project holds fingerprints deeper than shutil.rmtree can unlink, left
+        # "not empty" (issue #33).
+        delete_tree(entry)
 
 
 class WorkerSlots:

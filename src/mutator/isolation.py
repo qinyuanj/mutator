@@ -492,7 +492,17 @@ class CopyViews:
         if _key(location) in self._homes:
             yield
             return
-        parent = location / "target" / "mutation-workers"
+        # A worker cwd is run-<id>/worker-<n> or cargo-slot-<n>/worker, so
+        # location/target/mutation-workers nests the home one level deeper than
+        # the tree already under target/mutation-workers -- past the 260-char
+        # Win32 limit on a deep project (issue #33). Reuse the existing
+        # mutation-workers root when cwd is inside one; the baseline (cwd at the
+        # project root) keeps target/mutation-workers as before.
+        parent = next(
+            (folder for folder in (location, *location.parents)
+             if folder.name == "mutation-workers" and folder.parent.name == "target"),
+            location / "target" / "mutation-workers",
+        )
         parent.mkdir(parents=True, exist_ok=True)
         self.sweep(parent)
         directory = Path(tempfile.mkdtemp(prefix="run-home-", dir=parent))
