@@ -401,7 +401,10 @@ def test_help_and_conflicts_use_different_streams(capsys):
     assert captured.out == ""
 
 
-def test_changed_outside_git_reports_the_failure_and_selects_nothing(tmp_path, capsys):
+def test_changed_outside_git_reports_the_failure_and_selects_nothing(tmp_path, capsys, monkeypatch):
+    # tmp_path may sit inside this checkout. Stop Git at its parent so the
+    # root under test is a non-repository regardless of the temp placement.
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent))
     path = tmp_path / "src" / "demo.py"
     path.parent.mkdir()
     path.write_text("def place(x):\n    return x > 0\n", encoding="utf-8")
