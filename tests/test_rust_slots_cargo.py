@@ -30,9 +30,10 @@ FILES = {
                            "    assert!(!util::below(10));\n}\n",
     "app/Cargo.toml": '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n\n'
                       '[dependencies]\nutil = { path = "../util" }\nextdep = { path = "EXTDEP" }\n',
-    # Both path dependencies are used from the library: Cargo sees no test-only
-    # dependency to warn about, and worker slots keep the ordinary dependency
-    # artifact layout instead of dev-dependency build output.
+    # Both path dependencies are used from the library, so Cargo sees no
+    # test-only-dependency warning (the baseline must not fail on warnings).
+    # The artifact layout is Cargo's, not the manifest's: Cargo 1.100 lays
+    # rlibs under debug/build/<pkg>/<hash>/out regardless of the section.
     "app/src/lib.rs": "pub mod more;\npub use extdep::id;\npub use util::below;\n\npub fn twice(x: i64) -> i64 {\n    x + x\n}\n",
     "app/src/more.rs": "pub fn half(x: i64) -> i64 {\n    x / 2\n}\n",
     "app/tests/app.rs": "#[test]\nfn app() {\n    assert_eq!(app::twice(3), 6);\n"

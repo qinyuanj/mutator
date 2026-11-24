@@ -10,7 +10,7 @@ import pytest
 from host import symlink_file
 from mutator.runner import CommandRunner
 from mutator.model import Site
-from mutator.workers import WorkerSlots, discard_overlays, run_mutants
+from mutator.workers import WorkerSlots, discard_overlays, new_run_dir, run_mutants
 
 
 def project(root):
@@ -19,6 +19,31 @@ def project(root):
     for name in ("a.rs", "b.rs"):
         (root / "src" / name).write_bytes(b"pub fn f() -> i64 {\n    1\n}\n")
     return [root / "src" / name for name in ("a.rs", "b.rs")]
+
+
+def test_a_run_directory_leaves_room_for_cargo_output_under_max_path(tmp_path):
+    """A run worker's Cargo output must fit Win32's 260-character cap (#33).
+
+    Cargo writes the test executable and rlibs under <worker>/target/debug.
+    Cargo 1.100 lays intermediate rlibs at the deeper
+    debug/build/<pkg>/<hash>/out/lib<pkg>-<hash>.rlib (issue #33 CI), and
+    link.exe -- unlike cargo/rustc -- does not add the Win32 long-path prefix,
+    so a path of 260+ characters fails with LNK1104. On a CI temporary project
+    root (~110 characters, ...pytest-of-runneradmin/pytest-0/<test>/project)
+    the run directory's own name decides whether that fits: a run-<uuid4> name
+    pushed libextdep to 263 and the link failed. The name must stay as short as
+    a slot's cargo-slot-<n> so the deepest standard artifact stays under 259.
+    """
+    run = new_run_dir(tmp_path)
+    deepest = (
+        run / "worker-0" / "target" / "debug" / "build" / "extdep"
+        / ("0" * 16) / "out" / "libextdep-0123456789abcdef.rlib"
+    )
+    added = len(str(deepest)) - len(str(tmp_path))
+    assert 110 + added <= 259, (
+        f"a run directory adds {added} characters, so at a 110-character CI "
+        f"project root the deepest Cargo artifact is {110 + added}; shorten it"
+    )
 
 
 def test_two_concurrent_runs_get_different_slot_numbers(tmp_path):
