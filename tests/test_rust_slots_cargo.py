@@ -29,9 +29,11 @@ FILES = {
     "util/tests/below.rs": "#[test]\nfn below() {\n    assert!(util::below(9));\n"
                            "    assert!(!util::below(10));\n}\n",
     "app/Cargo.toml": '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n\n'
-                      '[dependencies]\nutil = { path = "../util" }\n\n'
-                      '[dev-dependencies]\nextdep = { path = "EXTDEP" }\n',
-    "app/src/lib.rs": "pub mod more;\n\npub fn twice(x: i64) -> i64 {\n    x + x\n}\n",
+                      '[dependencies]\nutil = { path = "../util" }\nextdep = { path = "EXTDEP" }\n',
+    # Both path dependencies are used from the library: Cargo sees no test-only
+    # dependency to warn about, and worker slots keep the ordinary dependency
+    # artifact layout instead of dev-dependency build output.
+    "app/src/lib.rs": "pub mod more;\npub use extdep::id;\npub use util::below;\n\npub fn twice(x: i64) -> i64 {\n    x + x\n}\n",
     "app/src/more.rs": "pub fn half(x: i64) -> i64 {\n    x / 2\n}\n",
     "app/tests/app.rs": "#[test]\nfn app() {\n    assert_eq!(app::twice(3), 6);\n"
                         "    assert_eq!(app::more::half(8), 4);\n"
